@@ -6,6 +6,7 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  DragOverlay,
 } from '@dnd-kit/core';
 import {
   arrayMove,
@@ -15,6 +16,7 @@ import {
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { restrictToVerticalAxis, restrictToParentElement } from '@dnd-kit/modifiers';
 import { GripVertical, Eye, EyeOff } from 'lucide-react';
 import { SECTION_LABELS } from '../config/templates';
 
@@ -73,7 +75,7 @@ const SortableItem = ({ id, isVisible, onToggleVisibility }) => {
 const SectionReorder = ({ sections, visibleSections, onReorder, onToggleVisibility }) => {
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: { distance: 5 },
+      activationConstraint: { distance: 8 },
     }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
@@ -83,11 +85,13 @@ const SectionReorder = ({ sections, visibleSections, onReorder, onToggleVisibili
   const handleDragEnd = (event) => {
     const { active, over } = event;
 
-    if (active.id !== over?.id) {
+    if (over && active.id !== over.id) {
       const oldIndex = sections.indexOf(active.id);
       const newIndex = sections.indexOf(over.id);
-      const newOrder = arrayMove(sections, oldIndex, newIndex);
-      onReorder(newOrder);
+      if (oldIndex !== -1 && newIndex !== -1) {
+        const newOrder = arrayMove([...sections], oldIndex, newIndex);
+        onReorder(newOrder);
+      }
     }
   };
 
@@ -100,6 +104,7 @@ const SectionReorder = ({ sections, visibleSections, onReorder, onToggleVisibili
         sensors={sensors}
         collisionDetection={closestCenter}
         onDragEnd={handleDragEnd}
+        modifiers={[restrictToVerticalAxis, restrictToParentElement]}
       >
         <SortableContext items={sections} strategy={verticalListSortingStrategy}>
           <div className="space-y-1.5">

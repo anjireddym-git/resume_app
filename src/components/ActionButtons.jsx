@@ -3,6 +3,7 @@ import { Download, FileText, RotateCcw, Loader2 } from 'lucide-react';
 import { pdf } from '@react-pdf/renderer';
 import UnifiedPDF from '../templates/UnifiedPDF';
 import { exportToDOCX } from '../services/exportService';
+import { analyticsService } from '../services/analyticsService';
 import { saveAs } from 'file-saver';
 
 const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onReset, hasChanges }) => {
@@ -43,9 +44,13 @@ const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onRes
       
       // Use file-saver for reliable cross-browser downloads with correct filename
       saveAs(blob, fileName);
+      
+      // Track PDF export
+      analyticsService.trackExportPDF(resumeData?.id, 'unified');
     } catch (err) {
       console.error('PDF generation failed:', err);
       alert('Failed to generate PDF. Please try again.');
+      analyticsService.trackAPIError('export/pdf', 'GENERATION_FAILED', err.message);
     } finally {
       setIsExportingPDF(false);
     }
@@ -60,9 +65,12 @@ const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onRes
     try {
       const fileName = getFileName('docx');
       await exportToDOCX(resumeData, fileName);
+      // Track DOCX export
+      analyticsService.trackExportDOCX(resumeData?.id);
     } catch (error) {
       console.error('DOCX export failed:', error);
       alert('Failed to export DOCX. Please try again.');
+      analyticsService.trackAPIError('export/docx', 'GENERATION_FAILED', error.message);
     } finally {
       setIsExportingDOCX(false);
     }
@@ -95,6 +103,7 @@ const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onRes
           <FileText className="w-4 h-4" />
         )}
         <span className="hidden sm:inline">{isExportingDOCX ? 'Exporting...' : 'DOCX'}</span>
+        <span className="hidden sm:inline text-[10px] px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded font-medium">BETA</span>
       </button>
       {hasChanges && (
         <button

@@ -284,7 +284,7 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
           {p.title && <Text style={styles.title}>{p.title}</Text>}
         </View>
 
-        <View style={styles.contactContainer}>
+        <View style={[styles.contactContainer, !p.title && { marginTop: 8 }]}>
           {contactItems.map((item, i) => (
             <React.Fragment key={i}>
               {item.isLink ? (

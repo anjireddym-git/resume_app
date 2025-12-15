@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useCredits } from '../contexts/CreditsContext';
 import { createResume, getResumesInGroup, getResume, buildFullResume } from '../services/resumeService';
 import { geminiService } from '../services/geminiService';
+import { analyticsService } from '../services/analyticsService';
 import { PREDEFINED_ROLES } from '../config/predefinedRoles';
 
 const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
@@ -105,8 +106,12 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
 
     if (credits < selectedRoles.length) {
       setError(`Insufficient credits. Need ${selectedRoles.length} credits.`);
+      analyticsService.trackLowCreditsWarning(credits);
       return;
     }
+
+    // Track auto-populate start
+    analyticsService.trackAIOptimizeStart(selectedRoles, 'auto_populate');
 
     const itemsToGenerate = selectedRoles.map(roleId => {
       const role = PREDEFINED_ROLES.find(r => r.id === roleId);
@@ -168,11 +173,15 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
       }
 
       await new Promise(resolve => setTimeout(resolve, 500));
+      // Track auto-populate completion
+      analyticsService.trackAIOptimizeSuccess(0, 0, 'auto_populate');
+      analyticsService.trackCreditsUsed('auto_populate', selectedRoles.length);
       onComplete();
       handleClose();
     } catch (err) {
       console.error('Failed to generate resumes:', err);
       setError('Failed to generate resumes. Please try again.');
+      analyticsService.trackAIOptimizeError(err.message, 'auto_populate');
       setStep('select');
     }
   };

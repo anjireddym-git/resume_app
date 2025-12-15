@@ -4,8 +4,13 @@ import { Loader2, FileText, AlertCircle } from 'lucide-react';
 import UnifiedPDF from '../templates/UnifiedPDF';
 
 const LivePDFPreview = ({ resumeData, themeConfig, sectionOrder }) => {
-  // Create a stable key from themeConfig to force re-render when it changes
-  const themeKey = useMemo(() => JSON.stringify(themeConfig || {}), [themeConfig]);
+  // Create a stable key from themeConfig and sectionOrder to force re-render when they change
+  const previewKey = useMemo(() => {
+    return JSON.stringify({
+      theme: themeConfig || {},
+      sections: sectionOrder || []
+    });
+  }, [themeConfig, sectionOrder]);
   
   // Memoize the PDF document to prevent unnecessary re-renders
   const pdfDocument = useMemo(() => {
@@ -18,7 +23,7 @@ const LivePDFPreview = ({ resumeData, themeConfig, sectionOrder }) => {
         sectionFormats={resumeData.sectionFormats}
       />
     );
-  }, [resumeData, themeKey, sectionOrder]);
+  }, [resumeData, previewKey, sectionOrder]);
 
   if (!resumeData?.personalInfo) {
     return (
@@ -33,7 +38,7 @@ const LivePDFPreview = ({ resumeData, themeConfig, sectionOrder }) => {
 
   return (
     <div className="h-full flex flex-col bg-neutral-700 rounded-lg overflow-hidden">
-      <BlobProvider key={themeKey} document={pdfDocument}>
+      <BlobProvider key={previewKey} document={pdfDocument}>
         {({ blob, url, loading, error }) => {
           if (error) {
             return (

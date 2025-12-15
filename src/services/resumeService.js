@@ -15,6 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
+import { DEFAULT_SECTION_ORDER } from '../config/templates';
 
 // ============ RESUME GROUPS ============
 
@@ -28,6 +29,8 @@ export const createResumeGroup = async (userId, groupData) => {
       education: groupData.education || [],
     },
     themeConfig: groupData.themeConfig || DEFAULT_THEME_CONFIG,
+    sectionOrder: groupData.sectionOrder || DEFAULT_SECTION_ORDER,
+    visibleSections: groupData.visibleSections || DEFAULT_SECTION_ORDER,
     resumeCount: 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -79,6 +82,15 @@ export const updateGroupTheme = async (groupId, themeConfig) => {
   const groupRef = doc(db, 'resumeGroups', groupId);
   await updateDoc(groupRef, {
     themeConfig,
+    updatedAt: serverTimestamp(),
+  });
+};
+
+export const updateGroupSectionLayout = async (groupId, sectionOrder, visibleSections) => {
+  const groupRef = doc(db, 'resumeGroups', groupId);
+  await updateDoc(groupRef, {
+    sectionOrder,
+    visibleSections,
     updatedAt: serverTimestamp(),
   });
 };

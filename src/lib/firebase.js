@@ -4,6 +4,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getFunctions, httpsCallable, connectFunctionsEmulator } from 'firebase/functions';
+import { getAnalytics, logEvent, setUserId, setUserProperties } from 'firebase/analytics';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "YOUR_API_KEY",
@@ -11,7 +12,8 @@ const firebaseConfig = {
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "YOUR_PROJECT_ID",
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "YOUR_PROJECT.appspot.com",
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "YOUR_SENDER_ID",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "YOUR_APP_ID"
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "YOUR_APP_ID",
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "YOUR_MEASUREMENT_ID"
 };
 
 // Initialize Firebase
@@ -30,6 +32,12 @@ export const db = getFirestore(app);
 // Cloud Functions
 export const functions = getFunctions(app);
 
+// Analytics - only initialize in browser environment
+let analytics = null;
+if (typeof window !== 'undefined') {
+  analytics = getAnalytics(app);
+}
+
 // Connect to emulator in development (uncomment when testing locally)
 // if (window.location.hostname === 'localhost') {
 //   connectFunctionsEmulator(functions, 'localhost', 5001);
@@ -37,6 +45,9 @@ export const functions = getFunctions(app);
 
 // Helper to call Cloud Functions
 export { httpsCallable };
+
+// Export analytics utilities
+export { analytics, logEvent, setUserId, setUserProperties };
 
 export default app;
 

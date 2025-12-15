@@ -21,6 +21,7 @@ import SplashScreen from './components/SplashScreen';
 import CreditsDisplay from './components/CreditsDisplay';
 import ResizableSplitPane from './components/ResizableSplitPane';
 import { geminiService } from './services/geminiService';
+import { analyticsService } from './services/analyticsService';
 import { TEMPLATES, DEFAULT_SECTION_ORDER } from './config/templates';
 import { 
   getResumeGroup, 
@@ -32,7 +33,8 @@ import {
   createVersionSnapshot,
   updateGroupSharedData,
   updateResumeSectionFormat,
-  getResumesInGroup
+  getResumesInGroup,
+  updateGroupSectionLayout
 } from './services/resumeService';
 import useResumeEditor from './hooks/useResumeEditor';
 
@@ -141,6 +143,10 @@ function App() {
       setJobDescription(resume.jobDescription || '');
       setMatchAnalysis(resume.matchAnalysis || null);
       
+      // Load section order and visibility from group (or use defaults)
+      setSectionOrder(group.sectionOrder || DEFAULT_SECTION_ORDER);
+      setVisibleSections(group.visibleSections || DEFAULT_SECTION_ORDER);
+      
       // Build full resume data
       const fullResume = buildFullResume(group, resume);
       setResumeData(fullResume);
@@ -190,6 +196,9 @@ function App() {
     setSelectedGroupId(groupId);
     setSelectedResumeId(resumeId);
     
+    // Track resume selection
+    analyticsService.trackResumeSelect(groupId, resumeId);
+    
     // Save to preferences
     await updatePreferences({
       currentGroupId: groupId,
@@ -219,12 +228,16 @@ function App() {
     if (createResumeGroupId) {
       setSelectedGroupId(createResumeGroupId);
       setSelectedResumeId(resumeId);
+      // Track resume creation
+      analyticsService.trackResumeCreate(createResumeGroupId, 'New Resume');
     }
   };
 
   const handleGroupCreated = (groupId) => {
     setRefreshTrigger(prev => prev + 1);
     setSelectedGroupId(groupId);
+    // Track group creation
+    analyticsService.trackGroupCreate('New Group');
   };
 
   const handleApiKeySet = (apiKey) => {
@@ -252,6 +265,7 @@ function App() {
     // Check credits before AI action
     if (!hasCredits) {
       setError('No credits remaining. Please purchase credits to use AI features.');
+      analyticsService.trackLowCreditsWarning(0);
       return;
     }
     
@@ -262,8 +276,11 @@ function App() {
       setMatchAnalysis(analysis);
       setJobDescription(jobDesc);
       await updateResumeMatchAnalysis(currentResume.id, analysis.matchScore, analysis);
+      // Track match analysis
+      analyticsService.trackAIMatchAnalysis(analysis.matchScore);
     } catch (err) {
       setError(err.message || 'Failed to analyze match.');
+      analyticsService.trackAIOptimizeError(err.message, 'match_analysis');
     } finally {
       setIsAnalyzing(false);
     }
@@ -280,8 +297,13 @@ function App() {
     if (!hasCredits) {
       setShowJobModal(false);
       setError('No credits remaining. Please purchase credits to use AI features.');
+      analyticsService.trackLowCreditsWarning(0);
       return;
     }
+    
+    // Track AI optimization start
+    analyticsService.trackAIOptimizeStart(fieldsToUpdate, mode);
+    const previousScore = matchAnalysis?.matchScore || 0;
     
     setShowJobModal(false);
     setIsLoading(true);
@@ -311,6 +333,9 @@ function App() {
           ? `Before transform: ${inputText.substring(0, 50)}...` 
           : `Before: ${fieldsToUpdate.join(', ')} update`,
       });
+      
+      // Track version snapshot creation
+      analyticsService.trackVersionSnapshotCreate(currentResume.id, mode === 'transform' ? 'transform' : 'optimize');
 
       console.log(`${mode === 'transform' ? 'Transform' : 'Optimize'} mode, calling AI...`);
       
@@ -326,6 +351,10 @@ function App() {
       setResumeData(updatedResume);
       setMatchAnalysis(analysis);
       setJobDescription(inputText);
+      
+      // Track AI optimization success
+      analyticsService.trackAIOptimizeSuccess(previousScore, analysis.matchScore, mode);
+      analyticsService.trackCreditsUsed(mode === 'transform' ? 'ai_transform' : 'ai_optimize', 1);
       
       // Save to Firebase - include all optimizable fields
       await updateResumeCustomData(currentResume.id, {
@@ -345,6 +374,8 @@ function App() {
     } catch (err) {
       console.error('Optimize error:', err);
       setError(err.message || 'Failed to optimize resume.');
+      // Track AI optimization error
+      analyticsService.trackAIOptimizeError(err.message, mode);
     } finally {
       setIsLoading(false);
       setIsAnalyzing(false);
@@ -360,6 +391,9 @@ function App() {
   // Handle section format changes - save immediately to Firebase
   const handleFormatChange = async (sectionId, formatId) => {
     if (!currentResume) return;
+    
+    // Track format change
+    analyticsService.trackFormatChange(sectionId, formatId);
     
     try {
       // Update local state immediately for responsive UI
@@ -406,10 +440,13 @@ function App() {
       
       await updateResumeCustomData(currentResume.id, sanitizedData);
       setHasUnsavedChanges(false);
+      // Track resume save
+      analyticsService.trackResumeSave(currentResume.id, true);
       console.log('Save successful');
     } catch (err) {
       console.error('Failed to save:', err);
       setError('Failed to save changes');
+      analyticsService.trackSaveError(currentResume.id, err.message);
     } finally {
       setIsSaving(false);
     }
@@ -465,6 +502,8 @@ function App() {
   const handleSaveSharedData = async (groupId, sharedData) => {
     await updateGroupSharedData(groupId, sharedData);
     setRefreshTrigger(prev => prev + 1);
+    // Track group shared data edit
+    analyticsService.trackGroupEditShared(groupId);
     
     // Reload current data if we're editing the active group
     if (selectedGroupId === groupId && selectedResumeId) {
@@ -475,10 +514,14 @@ function App() {
   const handleAutoPopulate = (group) => {
     setAutoPopulateGroup(group);
     setShowAutoPopulate(true);
+    // Track modal open
+    analyticsService.trackModalOpen('auto_populate');
   };
 
   const handleAutoPopulateComplete = () => {
     setRefreshTrigger(prev => prev + 1);
+    // Track auto populate action
+    analyticsService.trackAIAutoPopulate(autoPopulateGroup?.id, 'document_import');
   };
 
   const handleEditDesign = async (group, resumeId) => {
@@ -514,13 +557,18 @@ function App() {
       setDesignGroup(group);
       setDesignResumeData(targetResume);
       setShowDesignModal(true);
+      // Track design modal open
+      analyticsService.trackModalOpen('theme_customization');
     } catch (err) {
       console.error('Failed to load design context:', err);
+      analyticsService.trackLoadError('design', group?.id, err.message);
     }
   };
 
   const handleDesignUpdate = async () => {
     setRefreshTrigger(prev => prev + 1);
+    // Track theme design update
+    analyticsService.trackThemeChange(designGroup?.themeConfig?.preset || 'custom');
     
     // Always try to reload current group if we have one selected
     // This ensures the PDF preview updates with new theme
@@ -705,11 +753,10 @@ function App() {
                     {/* Layout Button - hidden on mobile */}
                     <button
                       onClick={() => setShowLayoutPanel(!showLayoutPanel)}
-                      disabled={true}
                       className={`hidden md:flex h-9 px-3 border rounded-lg text-sm font-medium items-center gap-2 ${
                         showLayoutPanel 
                           ? 'border-neutral-900 bg-neutral-900 text-white' 
-                          : 'border-neutral-200 text-neutral-300 hover:bg-neutral-50'
+                          : 'border-neutral-200 text-neutral-700 hover:bg-neutral-50'
                       }`}
                     >
                       <Layers className="w-4 h-4" />
@@ -772,16 +819,36 @@ function App() {
                     <div className="w-56 border-r border-neutral-200 bg-white p-4 overflow-y-auto flex-shrink-0">
                       <h3 className="text-sm font-medium text-neutral-900 mb-3">Section Order</h3>
                       <SectionReorder
-                        sections={[...new Set(sectionOrder)]}
-                        visibleSections={[...new Set(visibleSections)]}
-                        onReorder={(newOrder) => setSectionOrder([...new Set(newOrder)])}
-                        onToggleVisibility={(id) => {
-                          setVisibleSections(prev => {
-                            const uniquePrev = [...new Set(prev)];
-                            return uniquePrev.includes(id) 
-                              ? uniquePrev.filter(s => s !== id)
-                              : [...uniquePrev, id];
-                          });
+                        sections={sectionOrder}
+                        visibleSections={visibleSections}
+                        onReorder={async (newOrder) => {
+                          setSectionOrder(newOrder);
+                          // Track section reorder
+                          analyticsService.trackSectionReorder(newOrder);
+                          // Persist to Firestore
+                          if (selectedGroupId) {
+                            try {
+                              await updateGroupSectionLayout(selectedGroupId, newOrder, visibleSections);
+                            } catch (err) {
+                              console.error('Failed to save section order:', err);
+                            }
+                          }
+                        }}
+                        onToggleVisibility={async (id) => {
+                          const newVisibleSections = visibleSections.includes(id)
+                            ? visibleSections.filter(s => s !== id)
+                            : [...visibleSections, id];
+                          setVisibleSections(newVisibleSections);
+                          // Track section toggle
+                          analyticsService.trackSectionToggle(id, !visibleSections.includes(id));
+                          // Persist to Firestore
+                          if (selectedGroupId) {
+                            try {
+                              await updateGroupSectionLayout(selectedGroupId, sectionOrder, newVisibleSections);
+                            } catch (err) {
+                              console.error('Failed to save section visibility:', err);
+                            }
+                          }
                         }}
                       />
                     </div>

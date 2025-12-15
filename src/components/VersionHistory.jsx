@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { History, RotateCcw, Trash2, X, Loader2, Clock, ChevronRight } from 'lucide-react';
 import { getVersionSnapshots, restoreVersion, deleteVersionSnapshot } from '../services/resumeService';
+import { analyticsService } from '../services/analyticsService';
 import ConfirmDialog from './ConfirmDialog';
 
 const VersionHistory = ({ resumeId, onRestore, isOpen, onClose }) => {
@@ -17,6 +18,8 @@ const VersionHistory = ({ resumeId, onRestore, isOpen, onClose }) => {
       try {
         const loaded = await getVersionSnapshots(resumeId);
         setVersions(loaded);
+        // Track version history view
+        analyticsService.trackVersionHistoryView(resumeId, loaded.length);
       } catch (error) {
         console.error('Failed to load versions:', error);
       } finally {
@@ -31,6 +34,8 @@ const VersionHistory = ({ resumeId, onRestore, isOpen, onClose }) => {
     setRestoring(versionId);
     try {
       const restoredData = await restoreVersion(resumeId, versionId);
+      // Track version restore
+      analyticsService.trackVersionRestore(resumeId, versionId);
       onRestore(restoredData);
       onClose();
     } catch (error) {

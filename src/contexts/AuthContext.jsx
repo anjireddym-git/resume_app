@@ -6,6 +6,7 @@ import {
 } from 'firebase/auth';
 import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, googleProvider, db } from '../lib/firebase';
+import { analyticsService } from '../services/analyticsService';
 
 const AuthContext = createContext(null);
 
@@ -68,15 +69,24 @@ export const AuthProvider = ({ children }) => {
   const signInWithGoogle = async () => {
     try {
       const result = await signInWithPopup(auth, googleProvider);
+      // Track login event
+      analyticsService.trackLogin('google');
+      analyticsService.initSession(result.user.uid, {
+        email_domain: result.user.email?.split('@')[1] || 'unknown',
+      });
       return result.user;
     } catch (error) {
       console.error('Sign in error:', error);
+      analyticsService.trackAPIError('auth/signin', error.code, error.message);
       throw error;
     }
   };
 
   const signOut = async () => {
     try {
+      // Track logout before signing out
+      analyticsService.trackLogout();
+      analyticsService.clearUser();
       await firebaseSignOut(auth);
     } catch (error) {
       console.error('Sign out error:', error);

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { doc, onSnapshot, collection, query, orderBy, limit } from 'firebase/firestore';
 import { db, functions, httpsCallable } from '../lib/firebase';
 import { useAuth } from './AuthContext';
+import { analyticsService } from '../services/analyticsService';
 
 const CreditsContext = createContext(null);
 
@@ -86,6 +87,9 @@ export const CreditsProvider = ({ children }) => {
 
     setPurchaseLoading(true);
     setError(null);
+    
+    // Track purchase initiation
+    analyticsService.trackCreditsPurchaseInitiated(5, 9.99);
 
     try {
       const createCheckoutSession = httpsCallable(functions, 'createCheckoutSession');
@@ -100,6 +104,7 @@ export const CreditsProvider = ({ children }) => {
     } catch (err) {
       console.error('Purchase error:', err);
       setError(err.message || 'Failed to start checkout');
+      analyticsService.trackAPIError('credits/purchase', 'CHECKOUT_FAILED', err.message);
       return null;
     } finally {
       setPurchaseLoading(false);

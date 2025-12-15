@@ -4,6 +4,7 @@ import { PDFViewer } from '@react-pdf/renderer';
 import ThemeEditor from './ThemeEditor';
 import UnifiedPDF from '../templates/UnifiedPDF';
 import { updateGroupTheme, getResumeGroup } from '../services/resumeService';
+import { analyticsService } from '../services/analyticsService';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 
 const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate }) => {
@@ -31,10 +32,20 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
     try {
       await updateGroupTheme(group.id, themeConfig);
       
+      // Track theme customization
+      analyticsService.trackThemeChange(themeConfig.preset || 'custom');
+      if (themeConfig.colors?.primary) {
+        analyticsService.trackColorChange('primary', themeConfig.colors.primary);
+      }
+      if (themeConfig.fonts?.heading) {
+        analyticsService.trackFontChange('heading', themeConfig.fonts.heading);
+      }
+      
       if (onUpdate) onUpdate(); // Signal refresh
       onClose();
     } catch (error) {
       console.error('Failed to save theme:', error);
+      analyticsService.trackSaveError(group?.id, error.message);
     } finally {
       setIsSaving(false);
     }
