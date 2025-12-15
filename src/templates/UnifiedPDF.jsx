@@ -339,12 +339,14 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
 
   // Helper: Render bullet points
   const renderBullets = (items) => {
-    if (!items?.length) return null;
+    // Filter out empty, null, undefined, or whitespace-only items
+    const validItems = items?.filter(item => item && typeof item === 'string' && item.trim());
+    if (!validItems?.length) return null;
     const bulletChar = mergedTheme.content?.bulletStyle || '•';
     
     return (
       <View style={styles.bulletList}>
-        {items.map((item, i) => (
+        {validItems.map((item, i) => (
           <View key={i} style={styles.bulletItem}>
             <Text style={styles.bullet}>{bulletChar}</Text>
             <Text style={styles.bulletText}>{item}</Text>
@@ -408,8 +410,8 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
     const format = getFormat(sectionFormats, 'summary');
     const isPointsMode = format === 'points';
     
-    // Split summary by newlines for bullet points mode
-    const summaryLines = summaryText.split('\n').filter(line => line.trim());
+    // Split summary by newlines for bullet points mode, filter out empty lines
+    const summaryLines = summaryText.split('\n').filter(line => line && line.trim());
     const hasMultipleLines = summaryLines.length > 1;
     
     return (
@@ -428,14 +430,16 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
   const renderSkills = () => {
     const s = data.skills || {};
     
-    // Get all skill categories dynamically from the data
+    // Get all skill categories dynamically from the data, filter out empty items
     const skillCategories = Object.entries(s)
       .filter(([key, items]) => Array.isArray(items) && items.length > 0)
       .map(([key, items]) => ({
         // Capitalize first letter for display label
         label: key.charAt(0).toUpperCase() + key.slice(1),
-        items: items
-      }));
+        // Filter out empty, null, or whitespace-only items
+        items: items.filter(item => item && typeof item === 'string' && item.trim())
+      }))
+      .filter(cat => cat.items.length > 0); // Remove categories with no valid items
 
     if (skillCategories.length === 0) return null;
 

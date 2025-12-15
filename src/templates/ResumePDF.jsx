@@ -96,9 +96,9 @@ const ResumePDF = ({ resumeData }) => {
                     {intern.duration || `${intern.startDate} - ${intern.endDate}`}
                   </Text>
                 </View>
-                {intern.highlights?.length > 0 && (
+                {intern.highlights?.filter(h => h && h.trim()).length > 0 && (
                   <View style={styles.bulletList}>
-                    {intern.highlights.map((h, i) => (
+                    {intern.highlights.filter(h => h && h.trim()).map((h, i) => (
                       <View key={i} style={styles.bulletItem}>
                         <Text style={styles.bullet}>•</Text>
                         <Text style={styles.bulletText}>{h}</Text>

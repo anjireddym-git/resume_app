@@ -116,9 +116,9 @@ export const ProjectsSectionPDF = ({ data }) => {
           {project.description && (
             <Text style={styles.projectDesc}>{project.description}</Text>
           )}
-          {project.highlights?.length > 0 && (
+          {project.highlights?.filter(h => h && h.trim()).length > 0 && (
             <View style={styles.bulletList}>
-              {project.highlights.map((h, i) => (
+              {project.highlights.filter(h => h && h.trim()).map((h, i) => (
                 <View key={i} style={styles.bulletItem}>
                   <Text style={styles.bullet}>•</Text>
                   <Text style={styles.bulletText}>{h}</Text>

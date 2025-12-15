@@ -200,11 +200,23 @@ export const updateResume = async (resumeId, data) => {
 };
 
 export const updateResumeCustomData = async (resumeId, customData) => {
+  console.log('[resumeService] updateResumeCustomData called', { resumeId });
+  console.log('[resumeService] Raw customData:', JSON.stringify(customData, null, 2));
+  
+  const sanitized = sanitizeForFirebase(customData);
+  console.log('[resumeService] Sanitized data:', JSON.stringify(sanitized, null, 2));
+  
   const resumeRef = doc(db, 'resumes', resumeId);
-  await updateDoc(resumeRef, {
-    customData,
-    updatedAt: serverTimestamp(),
-  });
+  try {
+    await updateDoc(resumeRef, {
+      customData: sanitized,
+      updatedAt: serverTimestamp(),
+    });
+    console.log('[resumeService] updateResumeCustomData SUCCESS');
+  } catch (err) {
+    console.error('[resumeService] updateResumeCustomData FAILED:', err);
+    throw err;
+  }
 };
 
 export const updateResumeSectionFormats = async (resumeId, sectionFormats) => {
@@ -246,15 +258,26 @@ export const deleteResume = async (resumeId, groupId) => {
 
 // Create a version snapshot before AI updates
 export const createVersionSnapshot = async (resumeId, customData, metadata = {}) => {
-  const snapshotRef = await addDoc(collection(db, 'resumes', resumeId, 'versions'), {
-    customData,
-    jobDescription: metadata.jobDescription || '',
-    fieldsUpdated: metadata.fieldsUpdated || [],
-    label: metadata.label || 'Before AI update',
-    createdAt: serverTimestamp(),
-  });
+  console.log('[resumeService] createVersionSnapshot called', { resumeId, metadata });
+  console.log('[resumeService] Snapshot raw data:', JSON.stringify(customData, null, 2));
   
-  return snapshotRef.id;
+  const sanitized = sanitizeForFirebase(customData);
+  console.log('[resumeService] Snapshot sanitized data:', JSON.stringify(sanitized, null, 2));
+  
+  try {
+    const snapshotRef = await addDoc(collection(db, 'resumes', resumeId, 'versions'), {
+      customData: sanitized,
+      jobDescription: metadata.jobDescription || '',
+      fieldsUpdated: metadata.fieldsUpdated || [],
+      label: metadata.label || 'Before AI update',
+      createdAt: serverTimestamp(),
+    });
+    console.log('[resumeService] createVersionSnapshot SUCCESS, id:', snapshotRef.id);
+    return snapshotRef.id;
+  } catch (err) {
+    console.error('[resumeService] createVersionSnapshot FAILED:', err);
+    throw err;
+  }
 };
 
 // Get all version snapshots for a resume
@@ -308,6 +331,32 @@ export const deleteVersionSnapshot = async (resumeId, versionId) => {
 };
 
 // ============ HELPERS ============
+
+/**
+ * Recursively removes undefined values from an object for Firebase compatibility.
+ * Firebase doesn't accept undefined values, so we convert them to null or remove them.
+ */
+const sanitizeForFirebase = (obj) => {
+  if (obj === undefined) return null;
+  if (obj === null) return null;
+  if (typeof obj !== 'object') return obj;
+  
+  if (Array.isArray(obj)) {
+    return obj
+      .filter(item => item !== undefined) // Remove undefined items from arrays
+      .map(item => sanitizeForFirebase(item));
+  }
+  
+  const sanitized = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === undefined) {
+      // Skip undefined values entirely
+      continue;
+    }
+    sanitized[key] = sanitizeForFirebase(value);
+  }
+  return sanitized;
+};
 
 // Merge shared data with custom data to create full resume
 export const buildFullResume = (group, resume) => {

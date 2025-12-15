@@ -111,9 +111,9 @@ export const ExperienceSectionPDF = ({ data }) => {
             </View>
             <Text style={styles.expDate}>{exp.startDate} - {exp.endDate || 'Present'}</Text>
           </View>
-          {exp.highlights?.length > 0 && (
+          {exp.highlights?.filter(h => h && h.trim()).length > 0 && (
             <View style={styles.bulletList}>
-              {exp.highlights.map((h, i) => (
+              {exp.highlights.filter(h => h && h.trim()).map((h, i) => (
                 <View key={i} style={styles.bulletItem}>
                   <Text style={styles.bullet}>•</Text>
                   <Text style={styles.bulletText}>{h}</Text>

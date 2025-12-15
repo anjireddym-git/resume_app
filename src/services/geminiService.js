@@ -110,7 +110,14 @@ class AIService {
   }
 
   async updateResumeForJob(currentResume, jobDescription, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications']) {
+    console.log('[AIService] updateResumeForJob called');
+    console.log('[AIService] Fields to update:', fieldsToUpdate);
+    console.log('[AIService] Model:', this.model);
+    console.log('[AIService] Resume data sent:', JSON.stringify(currentResume, null, 2));
+    console.log('[AIService] Job description length:', jobDescription?.length);
+    
     try {
+      console.log('[AIService] Calling Cloud Function...');
       const result = await this.callAI({
         action: 'updateResumeForJob',
         data: {
@@ -121,13 +128,18 @@ class AIService {
         }
       });
       
+      console.log('[AIService] Cloud Function response:', JSON.stringify(result.data, null, 2));
+      
       if (!result.data?.success) {
+        console.error('[AIService] AI processing failed:', result.data?.error);
         throw new Error(result.data?.error || 'AI processing failed');
       }
       
+      console.log('[AIService] updateResumeForJob SUCCESS');
       return result.data.data;
     } catch (error) {
-      console.error('Error updating resume:', error);
+      console.error('[AIService] Error updating resume:', error);
+      console.error('[AIService] Error details:', { code: error.code, message: error.message });
       // Extract Firebase Functions error message
       if (error.code === 'functions/resource-exhausted') {
         throw new Error('Insufficient credits. Please purchase more credits to continue.');
@@ -137,7 +149,14 @@ class AIService {
   }
 
   async transformResumeForRole(currentResume, targetRole, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications']) {
+    console.log('[AIService] transformResumeForRole called');
+    console.log('[AIService] Target role:', targetRole);
+    console.log('[AIService] Fields to update:', fieldsToUpdate);
+    console.log('[AIService] Model:', this.model);
+    console.log('[AIService] Resume data sent:', JSON.stringify(currentResume, null, 2));
+    
     try {
+      console.log('[AIService] Calling Cloud Function...');
       const result = await this.callAI({
         action: 'transformResumeForRole',
         data: {
@@ -148,13 +167,18 @@ class AIService {
         }
       });
       
+      console.log('[AIService] Cloud Function response:', JSON.stringify(result.data, null, 2));
+      
       if (!result.data?.success) {
+        console.error('[AIService] AI processing failed:', result.data?.error);
         throw new Error(result.data?.error || 'AI processing failed');
       }
       
+      console.log('[AIService] transformResumeForRole SUCCESS');
       return result.data.data;
     } catch (error) {
-      console.error('Error transforming resume:', error);
+      console.error('[AIService] Error transforming resume:', error);
+      console.error('[AIService] Error details:', { code: error.code, message: error.message });
       if (error.code === 'functions/resource-exhausted') {
         throw new Error('Insufficient credits. Please purchase more credits to continue.');
       }
@@ -188,7 +212,11 @@ class AIService {
   }
 
   async analyzeMatch(currentResume, jobDescription) {
+    console.log('[AIService] analyzeMatch called');
+    console.log('[AIService] Model:', this.model);
+    
     try {
+      console.log('[AIService] Calling Cloud Function for match analysis...');
       const result = await this.callAI({
         action: 'analyzeMatch',
         data: {
@@ -198,13 +226,18 @@ class AIService {
         }
       });
       
+      console.log('[AIService] analyzeMatch response:', JSON.stringify(result.data, null, 2));
+      
       if (!result.data?.success) {
+        console.error('[AIService] analyzeMatch failed:', result.data?.error);
         throw new Error(result.data?.error || 'AI processing failed');
       }
       
+      console.log('[AIService] analyzeMatch SUCCESS');
       return result.data.data;
     } catch (error) {
-      console.error('Error analyzing match:', error);
+      console.error('[AIService] Error analyzing match:', error);
+      console.error('[AIService] Error details:', { code: error.code, message: error.message });
       if (error.code === 'functions/resource-exhausted') {
         throw new Error('Insufficient credits. Please purchase more credits to continue.');
       }

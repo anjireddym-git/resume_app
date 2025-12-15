@@ -288,13 +288,16 @@ function App() {
 
   const handleUpdateWithAI = async (jd, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'], mode = 'job') => {
     const inputText = jd || jobDescription;
+    console.log('[AI Update] Starting...', { mode, fieldsToUpdate, inputLength: inputText?.length });
+    
     if (!inputText.trim() || !currentResume) {
-      console.log('Missing input or current resume');
+      console.log('[AI Update] Missing input or current resume', { hasInput: !!inputText.trim(), hasResume: !!currentResume });
       return;
     }
     
     // Check credits before AI action
     if (!hasCredits) {
+      console.log('[AI Update] No credits available');
       setShowJobModal(false);
       setError('No credits remaining. Please purchase credits to use AI features.');
       analyticsService.trackLowCreditsWarning(0);
@@ -312,6 +315,7 @@ function App() {
     
     try {
       // Save snapshot before AI update using current resumeData
+      console.log('[AI Update] Creating version snapshot...');
       const snapshotData = {
         personalInfo: resumeData.personalInfo,
         summary: resumeData.summary,
@@ -325,6 +329,7 @@ function App() {
         internships: resumeData.internships,
         hackathons: resumeData.hackathons,
       };
+      console.log('[AI Update] Snapshot data:', JSON.stringify(snapshotData, null, 2));
       
       await createVersionSnapshot(currentResume.id, snapshotData, {
         jobDescription: inputText,
@@ -333,32 +338,37 @@ function App() {
           ? `Before transform: ${inputText.substring(0, 50)}...` 
           : `Before: ${fieldsToUpdate.join(', ')} update`,
       });
+      console.log('[AI Update] Version snapshot created successfully');
       
       // Track version snapshot creation
       analyticsService.trackVersionSnapshotCreate(currentResume.id, mode === 'transform' ? 'transform' : 'optimize');
 
-      console.log(`${mode === 'transform' ? 'Transform' : 'Optimize'} mode, calling AI...`);
+      console.log(`[AI Update] ${mode === 'transform' ? 'Transform' : 'Optimize'} mode, calling AI service...`);
+      console.log('[AI Update] Current resume data being sent:', JSON.stringify(resumeData, null, 2));
       
       // Call appropriate service method based on mode
       const updatedResume = mode === 'transform'
         ? await geminiService.transformResumeForRole(resumeData, inputText, fieldsToUpdate)
         : await geminiService.updateResumeForJob(resumeData, inputText, fieldsToUpdate);
       
-      console.log('AI update complete', updatedResume);
+      console.log('[AI Update] AI response received:', JSON.stringify(updatedResume, null, 2));
       
-      const analysis = await geminiService.analyzeMatch(updatedResume, inputText);
+      // Validate the response
+      if (!updatedResume) {
+        throw new Error('AI returned empty response');
+      }
       
       setResumeData(updatedResume);
-      setMatchAnalysis(analysis);
       setJobDescription(inputText);
       
-      // Track AI optimization success
-      analyticsService.trackAIOptimizeSuccess(previousScore, analysis.matchScore, mode);
+      // Track AI optimization success (without match score for now)
+      analyticsService.trackAIOptimizeSuccess(previousScore, 0, mode);
       analyticsService.trackCreditsUsed(mode === 'transform' ? 'ai_transform' : 'ai_optimize', 1);
       
       // Save to Firebase - include all optimizable fields
-      await updateResumeCustomData(currentResume.id, {
-        personalInfo: updatedResume.personalInfo, // Includes updated title
+      console.log('[AI Update] Saving to Firebase...');
+      const dataToSave = {
+        personalInfo: updatedResume.personalInfo,
         summary: updatedResume.summary,
         experience: updatedResume.experience?.map(exp => ({
           highlights: exp.highlights,
@@ -369,10 +379,18 @@ function App() {
         certifications: updatedResume.certifications,
         internships: updatedResume.internships,
         hackathons: updatedResume.hackathons,
-      });
-      await updateResumeMatchAnalysis(currentResume.id, analysis.matchScore, analysis);
+      };
+      console.log('[AI Update] Data to save:', JSON.stringify(dataToSave, null, 2));
+      
+      await updateResumeCustomData(currentResume.id, dataToSave);
+      console.log('[AI Update] Custom data saved. Complete!');
     } catch (err) {
-      console.error('Optimize error:', err);
+      console.error('[AI Update] ERROR:', err);
+      console.error('[AI Update] Error details:', {
+        message: err.message,
+        stack: err.stack,
+        name: err.name
+      });
       setError(err.message || 'Failed to optimize resume.');
       // Track AI optimization error
       analyticsService.trackAIOptimizeError(err.message, mode);
@@ -726,7 +744,7 @@ function App() {
           {selectedResumeId && currentResume ? (
             <>
               {/* Left Panel - Web Editor + Controls */}
-              <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 flex flex-col overflow-hidden relative">
                 {/* Toolbar */}
                 <div className="min-h-14 border-b border-neutral-200 bg-white px-3 md:px-4 py-2 flex flex-wrap items-center justify-between gap-2 flex-shrink-0">
                   <div className="flex items-center gap-2 md:gap-3 flex-wrap">
@@ -811,6 +829,28 @@ function App() {
                     />
                   </div>
                 </div>
+
+                {/* AI Processing Overlay */}
+                {isLoading && (
+                  <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-40 flex items-center justify-center">
+                    <div className="bg-white rounded-2xl shadow-xl p-8 max-w-sm mx-4 text-center border border-neutral-100">
+                      <div className="w-16 h-16 bg-neutral-900 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                        <Loader2 className="w-8 h-8 text-white animate-spin" />
+                      </div>
+                      <h3 className="text-lg font-semibold text-neutral-900 mb-2">
+                        {isAnalyzing ? 'Transforming Resume...' : 'Optimizing Resume...'}
+                      </h3>
+                      <p className="text-sm text-neutral-500">
+                        AI is tailoring your resume. This may take a few seconds.
+                      </p>
+                      <div className="mt-4 flex justify-center gap-1">
+                        <div className="w-2 h-2 bg-neutral-900 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                        <div className="w-2 h-2 bg-neutral-900 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                        <div className="w-2 h-2 bg-neutral-900 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Content Area - Resizable Split Pane (desktop) / Editor only (mobile) */}
                 <div className="flex-1 flex overflow-hidden">
