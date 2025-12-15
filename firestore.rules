@@ -1,0 +1,55 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to check if user owns the document
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+    
+    // Users collection - users can read their own data, but credits can only be modified by Cloud Functions (admin SDK)
+    match /users/{userId} {
+      // Allow read for own document
+      allow read: if isAuthenticated() && isOwner(userId);
+      
+      // Allow create/update but protect credits field from client writes
+      allow create: if isAuthenticated() && isOwner(userId) && 
+        !('credits' in request.resource.data);
+      allow update: if isAuthenticated() && isOwner(userId) && 
+        (!('credits' in request.resource.data) || request.resource.data.credits == resource.data.credits);
+      
+      // Transactions subcollection - read only for users, Cloud Functions write
+      match /transactions/{transactionId} {
+        allow read: if isAuthenticated() && isOwner(userId);
+        // Writes only via Cloud Functions (admin SDK bypasses rules)
+      }
+    }
+    
+    // Resume Groups collection - users can only access their own groups
+    match /resumeGroups/{groupId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+    
+    // Resumes collection - users can only access their own resumes
+    match /resumes/{resumeId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      
+      // Versions subcollection - accessible if parent resume belongs to user
+      match /versions/{versionId} {
+        allow read, write: if isAuthenticated() && 
+          get(/databases/$(database)/documents/resumes/$(resumeId)).data.userId == request.auth.uid;
+      }
+    }
+  }
+}
+

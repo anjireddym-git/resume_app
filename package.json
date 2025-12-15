@@ -1,0 +1,35 @@
+{
+  "name": "resume-updater",
+  "version": "1.0.0",
+  "description": "AI-powered resume updater using Gemini API",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@google/genai": "^1.31.0",
+    "@react-pdf/renderer": "^4.3.1",
+    "docx": "^9.5.1",
+    "file-saver": "^2.0.5",
+    "firebase": "^12.6.0",
+    "jspdf": "^3.0.4",
+    "lucide-react": "^0.460.0",
+    "pako": "^2.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.3.6",
+    "vite": "^5.0.0"
+  }
+}

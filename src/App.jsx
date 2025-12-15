@@ -1,0 +1,904 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { FileText, RefreshCw, LogOut, User, ChevronDown, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X, Eye } from 'lucide-react';
+import { useAuth } from './contexts/AuthContext';
+import { CreditsProvider, useCredits } from './contexts/CreditsContext';
+import LoginPage from './pages/LoginPage';
+import FileBrowser from './components/FileBrowser';
+import CreateGroupModal from './components/CreateGroupModal';
+import CreateResumeModal from './components/CreateResumeModal';
+import EditSharedModal from './components/EditSharedModal';
+import AutoPopulateModal from './components/AutoPopulateModal';
+import JobDescriptionModal from './components/JobDescriptionModal';
+import VersionHistory from './components/VersionHistory';
+import ResumeEditor from './components/ResumeEditor';
+import LivePDFPreview from './components/LivePDFPreview';
+import SectionReorder from './components/SectionReorder';
+import MatchAnalysis from './components/MatchAnalysis';
+import ActionButtons from './components/ActionButtons';
+import ApiKeyInput from './components/ApiKeyInput';
+import SplashScreen from './components/SplashScreen';
+import CreditsDisplay from './components/CreditsDisplay';
+import { geminiService } from './services/geminiService';
+import { TEMPLATES, DEFAULT_SECTION_ORDER } from './config/templates';
+import { 
+  getResumeGroup, 
+  getResume, 
+  updateResumeCustomData, 
+  updateResumeMatchAnalysis,
+  createResume,
+  buildFullResume,
+  createVersionSnapshot,
+  updateGroupSharedData,
+  updateResumeSectionFormat
+} from './services/resumeService';
+import useResumeEditor from './hooks/useResumeEditor';
+
+const INITIAL_RESUME_DATA = {};
+
+function App() {
+  const { user, isAuthenticated, loading: authLoading, signOut, updatePreferences } = useAuth();
+  const { credits, hasCredits, purchaseCredits } = useCredits();
+  
+  const [showSplash, setShowSplash] = useState(true);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showCreateResume, setShowCreateResume] = useState(false);
+  const [showJobModal, setShowJobModal] = useState(false);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [createResumeGroupId, setCreateResumeGroupId] = useState(null);
+  const [showEditShared, setShowEditShared] = useState(false);
+  const [editSharedGroup, setEditSharedGroup] = useState(null);
+  const [showAutoPopulate, setShowAutoPopulate] = useState(false);
+  const [autoPopulateGroup, setAutoPopulateGroup] = useState(null);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showMobilePDFPreview, setShowMobilePDFPreview] = useState(false);
+  
+  // Current selection
+  const [selectedGroupId, setSelectedGroupId] = useState(null);
+  const [selectedResumeId, setSelectedResumeId] = useState(null);
+  const [currentGroup, setCurrentGroup] = useState(null);
+  const [currentResume, setCurrentResume] = useState(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  
+  // Editor state
+  const [jobDescription, setJobDescription] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [error, setError] = useState('');
+  const [apiKeySet, setApiKeySet] = useState(true);
+  const [currentModel, setCurrentModel] = useState('gemini-2.5-pro');
+  const [matchAnalysis, setMatchAnalysis] = useState(null);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState(null);
+
+  // Template & layout state
+  const [selectedTemplate, setSelectedTemplate] = useState('classic');
+  const [sectionOrder, setSectionOrder] = useState(DEFAULT_SECTION_ORDER);
+  const [visibleSections, setVisibleSections] = useState(DEFAULT_SECTION_ORDER);
+  const [showLayoutPanel, setShowLayoutPanel] = useState(false);
+
+  const resumeRef = useRef(null);
+  const resumeDataRef = useRef({}); // Keep track of latest resume data
+  
+  const {
+    resumeData,
+    setResumeData,
+    updateField,
+    reset: resetEditor,
+  } = useResumeEditor(INITIAL_RESUME_DATA);
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    resumeDataRef.current = resumeData;
+  }, [resumeData]);
+
+  // Gemini service is initialized automatically via Cloud Functions
+  // No need for API key initialization on frontend
+
+  // Load resume when selected
+  const loadData = useCallback(async () => {
+    if (!selectedGroupId || !selectedResumeId) {
+      setCurrentGroup(null);
+      setCurrentResume(null);
+      setResumeData({});
+      return;
+    }
+
+    setDataLoading(true);
+    try {
+      const [group, resume] = await Promise.all([
+        getResumeGroup(selectedGroupId),
+        getResume(selectedResumeId)
+      ]);
+      
+      // If resume or group not found (deleted), clear selection
+      if (!group || !resume) {
+        console.log('Resume or group not found, clearing selection');
+        setSelectedGroupId(null);
+        setSelectedResumeId(null);
+        setCurrentGroup(null);
+        setCurrentResume(null);
+        setResumeData({});
+        return;
+      }
+      
+      setCurrentGroup(group);
+      setCurrentResume(resume);
+      setJobDescription(resume.jobDescription || '');
+      setMatchAnalysis(resume.matchAnalysis || null);
+      
+      // Build full resume data
+      const fullResume = buildFullResume(group, resume);
+      setResumeData(fullResume);
+      resetEditor(fullResume);
+      setHasUnsavedChanges(false); // Reset unsaved changes on load
+    } catch (err) {
+      console.error('Failed to load resume:', err);
+      // Resume or group might be deleted, clear selection
+      setSelectedGroupId(null);
+      setSelectedResumeId(null);
+      setCurrentGroup(null);
+      setCurrentResume(null);
+      setResumeData({});
+    } finally {
+      setDataLoading(false);
+    }
+  }, [selectedGroupId, selectedResumeId, setResumeData, resetEditor]);
+
+  // Load resume when selected
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  // Restore last selection from user preferences
+  useEffect(() => {
+    if (user?.preferences?.currentGroupId) {
+      setSelectedGroupId(user.preferences.currentGroupId);
+      if (user.preferences.currentResumeId) {
+        setSelectedResumeId(user.preferences.currentResumeId);
+      }
+    }
+    // Load saved model preference
+    if (user?.preferences?.selectedModel) {
+      setCurrentModel(user.preferences.selectedModel);
+      geminiService.setModel(user.preferences.selectedModel);
+    }
+  }, [user?.preferences]);
+
+  const handleSelectResume = async (groupId, resumeId) => {
+    // Check for unsaved changes before navigating
+    if (hasUnsavedChanges) {
+      setPendingNavigation({ groupId, resumeId });
+      setShowUnsavedWarning(true);
+      return;
+    }
+    
+    setSelectedGroupId(groupId);
+    setSelectedResumeId(resumeId);
+    
+    // Save to preferences
+    await updatePreferences({
+      currentGroupId: groupId,
+      currentResumeId: resumeId
+    });
+  };
+
+  // Complete navigation after saving/discarding
+  const completeNavigation = async (groupId, resumeId) => {
+    setSelectedGroupId(groupId);
+    setSelectedResumeId(resumeId);
+    setHasUnsavedChanges(false);
+    
+    await updatePreferences({
+      currentGroupId: groupId,
+      currentResumeId: resumeId
+    });
+  };
+
+  const handleCreateResume = (groupId) => {
+    setCreateResumeGroupId(groupId);
+    setShowCreateResume(true);
+  };
+
+  const handleResumeCreated = (resumeId) => {
+    setRefreshTrigger(prev => prev + 1);
+    if (createResumeGroupId) {
+      setSelectedGroupId(createResumeGroupId);
+      setSelectedResumeId(resumeId);
+    }
+  };
+
+  const handleGroupCreated = (groupId) => {
+    setRefreshTrigger(prev => prev + 1);
+    setSelectedGroupId(groupId);
+  };
+
+  const handleApiKeySet = (apiKey) => {
+    try {
+      geminiService.initialize(apiKey);
+      setApiKeySet(true);
+      setError('');
+    } catch (err) {
+      setError('Failed to initialize API.');
+      setApiKeySet(false);
+    }
+  };
+
+  const handleModelChange = async (modelId) => {
+    setCurrentModel(modelId);
+    geminiService.setModel(modelId);
+    // Save model preference to Firebase
+    await updatePreferences({ selectedModel: modelId });
+  };
+
+  const handleCheckMatch = async (jd) => {
+    const jobDesc = jd || jobDescription;
+    if (!jobDesc.trim() || !currentResume) return;
+    
+    // Check credits before AI action
+    if (!hasCredits) {
+      setError('No credits remaining. Please purchase credits to use AI features.');
+      return;
+    }
+    
+    setIsAnalyzing(true);
+    setError('');
+    try {
+      const analysis = await geminiService.analyzeMatch(resumeData, jobDesc);
+      setMatchAnalysis(analysis);
+      setJobDescription(jobDesc);
+      await updateResumeMatchAnalysis(currentResume.id, analysis.matchScore, analysis);
+    } catch (err) {
+      setError(err.message || 'Failed to analyze match.');
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleUpdateWithAI = async (jd, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'], mode = 'job') => {
+    const inputText = jd || jobDescription;
+    if (!inputText.trim() || !currentResume) {
+      console.log('Missing input or current resume');
+      return;
+    }
+    
+    // Check credits before AI action
+    if (!hasCredits) {
+      setShowJobModal(false);
+      setError('No credits remaining. Please purchase credits to use AI features.');
+      return;
+    }
+    
+    setShowJobModal(false);
+    setIsLoading(true);
+    setIsAnalyzing(true);
+    setError('');
+    
+    try {
+      // Save snapshot before AI update using current resumeData
+      const snapshotData = {
+        personalInfo: resumeData.personalInfo,
+        summary: resumeData.summary,
+        experience: resumeData.experience?.map(exp => ({
+          highlights: exp.highlights,
+          environment: exp.environment
+        })),
+        skills: resumeData.skills,
+        projects: resumeData.projects,
+        certifications: resumeData.certifications,
+        internships: resumeData.internships,
+        hackathons: resumeData.hackathons,
+      };
+      
+      await createVersionSnapshot(currentResume.id, snapshotData, {
+        jobDescription: inputText,
+        fieldsUpdated: fieldsToUpdate,
+        label: mode === 'transform' 
+          ? `Before transform: ${inputText.substring(0, 50)}...` 
+          : `Before: ${fieldsToUpdate.join(', ')} update`,
+      });
+
+      console.log(`${mode === 'transform' ? 'Transform' : 'Optimize'} mode, calling AI...`);
+      
+      // Call appropriate service method based on mode
+      const updatedResume = mode === 'transform'
+        ? await geminiService.transformResumeForRole(resumeData, inputText, fieldsToUpdate)
+        : await geminiService.updateResumeForJob(resumeData, inputText, fieldsToUpdate);
+      
+      console.log('AI update complete', updatedResume);
+      
+      const analysis = await geminiService.analyzeMatch(updatedResume, inputText);
+      
+      setResumeData(updatedResume);
+      setMatchAnalysis(analysis);
+      setJobDescription(inputText);
+      
+      // Save to Firebase - include all optimizable fields
+      await updateResumeCustomData(currentResume.id, {
+        personalInfo: updatedResume.personalInfo, // Includes updated title
+        summary: updatedResume.summary,
+        experience: updatedResume.experience?.map(exp => ({
+          highlights: exp.highlights,
+          environment: exp.environment
+        })),
+        skills: updatedResume.skills,
+        projects: updatedResume.projects,
+        certifications: updatedResume.certifications,
+        internships: updatedResume.internships,
+        hackathons: updatedResume.hackathons,
+      });
+      await updateResumeMatchAnalysis(currentResume.id, analysis.matchScore, analysis);
+    } catch (err) {
+      console.error('Optimize error:', err);
+      setError(err.message || 'Failed to optimize resume.');
+    } finally {
+      setIsLoading(false);
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleFieldUpdate = (path, value) => {
+    // Update local state only - don't auto-save
+    updateField(path, value);
+    setHasUnsavedChanges(true);
+  };
+
+  // Handle section format changes - save immediately to Firebase
+  const handleFormatChange = async (sectionId, formatId) => {
+    if (!currentResume) return;
+    
+    try {
+      // Update local state immediately for responsive UI
+      setResumeData(prev => ({
+        ...prev,
+        sectionFormats: {
+          ...prev.sectionFormats,
+          [sectionId]: formatId
+        }
+      }));
+      
+      // Save to Firebase
+      await updateResumeSectionFormat(currentResume.id, sectionId, formatId);
+    } catch (err) {
+      console.error('Failed to save format:', err);
+    }
+  };
+
+  // Save all changes to Firebase
+  const handleSave = async () => {
+    if (!currentResume || !hasUnsavedChanges) return;
+    
+    // Use ref to get the latest data
+    const dataToSave = resumeDataRef.current;
+    console.log('Saving data:', dataToSave);
+    
+    setIsSaving(true);
+    try {
+      // Sanitize data - Firebase doesn't accept undefined values
+      const sanitizedData = {
+        personalInfo: dataToSave.personalInfo || {},
+        summary: dataToSave.summary || '',
+        experience: (dataToSave.experience || []).map(exp => ({
+          highlights: exp.highlights || [],
+          environment: exp.environment || ''
+        })),
+        education: dataToSave.education || [],
+        skills: dataToSave.skills || {},
+        projects: dataToSave.projects || [],
+        certifications: dataToSave.certifications || [],
+        internships: dataToSave.internships || [],
+        hackathons: dataToSave.hackathons || [],
+      };
+      
+      await updateResumeCustomData(currentResume.id, sanitizedData);
+      setHasUnsavedChanges(false);
+      console.log('Save successful');
+    } catch (err) {
+      console.error('Failed to save:', err);
+      setError('Failed to save changes');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Handle navigation with unsaved changes warning
+  const handleResumeSelect = (groupId, resumeId) => {
+    if (hasUnsavedChanges) {
+      setPendingNavigation({ groupId, resumeId });
+      setShowUnsavedWarning(true);
+    } else {
+      setSelectedGroupId(groupId);
+      setSelectedResumeId(resumeId);
+    }
+  };
+
+  const confirmNavigation = async () => {
+    if (pendingNavigation) {
+      await completeNavigation(pendingNavigation.groupId, pendingNavigation.resumeId);
+      setPendingNavigation(null);
+    }
+    setShowUnsavedWarning(false);
+  };
+
+  const cancelNavigation = () => {
+    setPendingNavigation(null);
+    setShowUnsavedWarning(false);
+  };
+
+  // Browser beforeunload warning
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasUnsavedChanges]);
+
+  // Show splash
+  if (showSplash) {
+    return <SplashScreen onComplete={() => setShowSplash(false)} />;
+  }
+
+  // Show loading
+  const handleEditShared = (group) => {
+    setEditSharedGroup(group);
+    setShowEditShared(true);
+  };
+
+  const handleSaveSharedData = async (groupId, sharedData) => {
+    await updateGroupSharedData(groupId, sharedData);
+    setRefreshTrigger(prev => prev + 1);
+    
+    // Reload current data if we're editing the active group
+    if (selectedGroupId === groupId && selectedResumeId) {
+      loadData();
+    }
+  };
+
+  const handleAutoPopulate = (group) => {
+    setAutoPopulateGroup(group);
+    setShowAutoPopulate(true);
+  };
+
+  const handleAutoPopulateComplete = () => {
+    setRefreshTrigger(prev => prev + 1);
+  };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#fafafa] flex items-center justify-center">
+        <Loader2 className="w-6 h-6 text-neutral-400 animate-spin" />
+      </div>
+    );
+  }
+
+  // Show login if not authenticated
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
+  return (
+    <div className="min-h-screen bg-[#fafafa] flex flex-col">
+      {/* Header */}
+      <header className="h-14 bg-white border-b border-neutral-200 flex items-center justify-between px-4 flex-shrink-0">
+        <div className="flex items-center gap-2">
+          {/* Mobile Menu Button */}
+          <button
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="md:hidden p-2 -ml-2 text-neutral-600 hover:bg-neutral-100 rounded-lg"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          <FileText className="w-5 h-5 text-neutral-900" strokeWidth={1.5} />
+          <span className="font-medium text-neutral-900">Resume</span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Credits Display */}
+          <CreditsDisplay />
+          
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className="hidden sm:flex h-8 px-3 rounded-md text-sm text-neutral-600 hover:bg-neutral-100 items-center gap-1"
+          >
+            Settings
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSettings ? 'rotate-180' : ''}`} />
+          </button>
+
+          {/* User Menu */}
+          <div className="relative">
+            <button
+              onClick={() => setShowUserMenu(!showUserMenu)}
+              className="h-8 w-8 rounded-full overflow-hidden border-2 border-neutral-200 hover:border-neutral-300"
+            >
+              {user?.photoURL ? (
+                <img src={user.photoURL} alt={user.displayName} className="w-full h-full object-cover" />
+              ) : (
+                <User className="w-full h-full p-1.5 text-neutral-400" />
+              )}
+            </button>
+
+            {showUserMenu && (
+              <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-neutral-200 rounded-lg shadow-lg z-20 py-1">
+                <div className="px-3 py-2 border-b border-neutral-100">
+                  <p className="text-sm font-medium text-neutral-900">{user?.displayName}</p>
+                  <p className="text-xs text-neutral-500">{user?.email}</p>
+                </div>
+                <button
+                  onClick={() => { signOut(); setShowUserMenu(false); }}
+                  className="w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-50 flex items-center gap-2"
+                >
+                  <LogOut className="w-4 h-4" />
+                  Sign Out
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* Settings Panel */}
+      {showSettings && (
+        <div className="bg-white border-b border-neutral-200 px-4 py-3">
+          <ApiKeyInput 
+            onApiKeySet={handleApiKeySet} 
+            onModelChange={handleModelChange}
+            isSet={apiKeySet} 
+            currentModel={currentModel}
+          />
+        </div>
+      )}
+
+      {/* Main Content */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Mobile Sidebar Overlay */}
+        {sidebarOpen && (
+          <div 
+            className="fixed inset-0 bg-black/50 z-40 md:hidden"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+        
+        {/* Left Sidebar - File Browser */}
+        <div className={`
+          fixed inset-y-0 left-0 z-50 w-64 bg-white border-r border-neutral-200 
+          transform transition-transform duration-300 ease-in-out
+          md:relative md:translate-x-0 md:z-0
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+        `}>
+          {/* Mobile Sidebar Header */}
+          <div className="h-14 border-b border-neutral-200 flex items-center justify-between px-4 md:hidden">
+            <span className="font-medium text-neutral-900">Resumes</span>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="p-2 -mr-2 text-neutral-600 hover:bg-neutral-100 rounded-lg"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <FileBrowser
+            onSelectResume={(groupId, resumeId) => {
+              handleSelectResume(groupId, resumeId);
+              setSidebarOpen(false); // Close sidebar on mobile after selection
+            }}
+            selectedResumeId={selectedResumeId}
+            selectedGroupId={selectedGroupId}
+            onCreateGroup={() => { setShowCreateGroup(true); setSidebarOpen(false); }}
+            onCreateResume={(groupId) => {
+              setCreateResumeGroupId(groupId);
+              setShowCreateResume(true);
+              setSidebarOpen(false);
+            }}
+            onEditShared={(group) => { handleEditShared(group); setSidebarOpen(false); }}
+            onAutoPopulate={(group) => { handleAutoPopulate(group); setSidebarOpen(false); }}
+            refreshTrigger={refreshTrigger}
+          />
+        </div>
+
+        {/* Main Area */}
+        <div className="flex-1 flex overflow-hidden">
+          {selectedResumeId && currentResume ? (
+            <>
+              {/* Left Panel - Web Editor + Controls */}
+              <div className="flex-1 flex flex-col overflow-hidden">
+                {/* Toolbar */}
+                <div className="min-h-14 border-b border-neutral-200 bg-white px-3 md:px-4 py-2 flex flex-wrap items-center justify-between gap-2 flex-shrink-0">
+                  <div className="flex items-center gap-2 md:gap-3 flex-wrap">
+                    {/* Optimize Button */}
+                    <button
+                      onClick={() => setShowJobModal(true)}
+                      disabled={!apiKeySet || isLoading || !hasCredits}
+                      className="h-9 px-3 md:px-4 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 disabled:opacity-50 flex items-center gap-2"
+                      title={!hasCredits ? 'No credits - purchase credits to continue' : 'Optimize resume for job'}
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span className="hidden sm:inline">Optimize</span>
+                    </button>
+
+                    {/* History Button */}
+                    <button
+                      onClick={() => setShowVersionHistory(true)}
+                      className="h-9 px-3 border border-neutral-200 text-neutral-600 rounded-lg text-sm font-medium hover:bg-neutral-50 flex items-center gap-2"
+                      title="Version History"
+                    >
+                      <History className="w-4 h-4" />
+                    </button>
+
+                    {/* Layout Button - hidden on mobile */}
+                    <button
+                      onClick={() => setShowLayoutPanel(!showLayoutPanel)}
+                      disabled={true}
+                      className={`hidden md:flex h-9 px-3 border rounded-lg text-sm font-medium items-center gap-2 ${
+                        showLayoutPanel 
+                          ? 'border-neutral-900 bg-neutral-900 text-white' 
+                          : 'border-neutral-200 text-neutral-300 hover:bg-neutral-50'
+                      }`}
+                    >
+                      <Layers className="w-4 h-4" />
+                    </button>
+                    
+                    {/* Match Score Badge */}
+                    {matchAnalysis && (
+                      <div className={`px-2 md:px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium ${
+                        matchAnalysis.matchScore >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                        matchAnalysis.matchScore >= 60 ? 'bg-amber-100 text-amber-700' :
+                        'bg-neutral-100 text-neutral-600'
+                      }`}>
+                        {matchAnalysis.matchScore}%<span className="hidden sm:inline"> Match</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 md:gap-3 flex-wrap">
+                    {/* Save Button - shows when there are unsaved changes */}
+                    {hasUnsavedChanges && (
+                      <button
+                        onClick={handleSave}
+                        disabled={isSaving}
+                        className="h-9 px-3 md:px-4 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2 transition-all animate-pulse"
+                      >
+                        {isSaving ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Save className="w-4 h-4" />
+                        )}
+                        <span className="hidden sm:inline">{isSaving ? 'Saving...' : 'Save'}</span>
+                      </button>
+                    )}
+
+                    {/* Template Selector */}
+                    <select
+                      value={selectedTemplate}
+                      onChange={(e) => setSelectedTemplate(e.target.value)}
+                      className="h-9 px-2 md:px-3 border border-neutral-200 rounded-lg text-sm text-neutral-700 bg-white"
+                    >
+                      {Object.values(TEMPLATES).map(t => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+
+                    <ActionButtons
+                      resumeRef={resumeRef}
+                      resumeData={resumeData}
+                      templateId={selectedTemplate}
+                      sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+                      hasChanges={hasUnsavedChanges}
+                    />
+                  </div>
+                </div>
+
+                {/* Content Area */}
+                <div className="flex-1 flex overflow-hidden">
+                  {/* Layout Panel (collapsible) */}
+                  {showLayoutPanel && (
+                    <div className="w-56 border-r border-neutral-200 bg-white p-4 overflow-y-auto flex-shrink-0">
+                      <h3 className="text-sm font-medium text-neutral-900 mb-3">Section Order</h3>
+                      <SectionReorder
+                        sections={[...new Set(sectionOrder)]}
+                        visibleSections={[...new Set(visibleSections)]}
+                        onReorder={(newOrder) => setSectionOrder([...new Set(newOrder)])}
+                        onToggleVisibility={(id) => {
+                          setVisibleSections(prev => {
+                            const uniquePrev = [...new Set(prev)];
+                            return uniquePrev.includes(id) 
+                              ? uniquePrev.filter(s => s !== id)
+                              : [...uniquePrev, id];
+                          });
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Editor */}
+                  <div className="flex-1 overflow-hidden">
+                    <ResumeEditor
+                      resumeData={resumeData}
+                      onUpdate={handleFieldUpdate}
+                      onFormatChange={handleFormatChange}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Panel - Live PDF Preview (hidden on mobile) */}
+              <div className="hidden lg:flex w-[45%] border-l border-neutral-200 bg-neutral-800 p-4 flex-col flex-shrink-0">
+                <div className="text-xs text-neutral-400 mb-2 flex items-center justify-between">
+                  <span>PDF Preview</span>
+                  <span className="text-neutral-500">{TEMPLATES[selectedTemplate]?.name}</span>
+                </div>
+                <div className="flex-1 rounded-lg overflow-hidden">
+                  <LivePDFPreview
+                    resumeData={resumeData}
+                    templateId={selectedTemplate}
+                    sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+                  />
+                </div>
+              </div>
+
+              {/* Mobile PDF Preview Button (FAB) */}
+              <button
+                onClick={() => setShowMobilePDFPreview(true)}
+                className="lg:hidden fixed bottom-6 right-6 z-30 w-14 h-14 bg-neutral-900 text-white rounded-full shadow-lg flex items-center justify-center hover:bg-neutral-800 transition-colors safe-area-bottom"
+                title="Preview PDF"
+              >
+                <Eye className="w-6 h-6" />
+              </button>
+            </>
+          ) : (
+            /* Empty State */
+            <div className="flex-1 flex items-center justify-center bg-[#fafafa]">
+              <div className="text-center">
+                <div className="w-16 h-16 bg-neutral-200 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                  <FileText className="w-8 h-8 text-neutral-400" />
+                </div>
+                <h2 className="text-lg font-medium text-neutral-900 mb-2">No resume selected</h2>
+                <p className="text-sm text-neutral-500 mb-4">Select a resume from the sidebar or create a new group</p>
+                <button
+                  onClick={() => setShowCreateGroup(true)}
+                  className="h-10 px-4 bg-neutral-900 text-white rounded-lg text-sm font-medium"
+                >
+                  Create Resume Group
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Modals */}
+      <CreateGroupModal
+        isOpen={showCreateGroup}
+        onClose={() => setShowCreateGroup(false)}
+        onComplete={handleGroupCreated}
+      />
+      
+      <CreateResumeModal
+        isOpen={showCreateResume}
+        onClose={() => setShowCreateResume(false)}
+        groupId={createResumeGroupId}
+        onComplete={handleResumeCreated}
+      />
+
+      <EditSharedModal
+        isOpen={showEditShared}
+        onClose={() => setShowEditShared(false)}
+        group={editSharedGroup}
+        onSave={handleSaveSharedData}
+      />
+
+      <AutoPopulateModal
+        isOpen={showAutoPopulate}
+        onClose={() => setShowAutoPopulate(false)}
+        group={autoPopulateGroup}
+        onComplete={handleAutoPopulateComplete}
+      />
+      
+      <JobDescriptionModal
+        isOpen={showJobModal}
+        onClose={() => setShowJobModal(false)}
+        onOptimize={handleUpdateWithAI}
+        onCheckMatch={handleCheckMatch}
+        isLoading={isLoading}
+        isAnalyzing={isAnalyzing}
+        initialJobDescription={jobDescription}
+      />
+
+      {/* Version History Modal */}
+      <VersionHistory
+        isOpen={showVersionHistory}
+        onClose={() => setShowVersionHistory(false)}
+        resumeId={selectedResumeId}
+        onRestore={(restoredCustomData) => {
+          // Rebuild full resume with restored data
+          if (currentGroup) {
+            const fullResume = buildFullResume(currentGroup, { customData: restoredCustomData });
+            setResumeData(fullResume);
+            setMatchAnalysis(null);
+          }
+        }}
+      />
+
+      {/* Mobile PDF Preview Modal */}
+      {showMobilePDFPreview && (
+        <div className="fixed inset-0 bg-neutral-800 z-50 flex flex-col lg:hidden">
+          {/* Modal Header */}
+          <div className="h-14 bg-neutral-900 flex items-center justify-between px-4 flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <FileText className="w-5 h-5 text-white" />
+              <span className="text-white font-medium">PDF Preview</span>
+              <span className="text-neutral-400 text-sm">• {TEMPLATES[selectedTemplate]?.name}</span>
+            </div>
+            <button
+              onClick={() => setShowMobilePDFPreview(false)}
+              className="p-2 text-neutral-400 hover:text-white rounded-lg"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          
+          {/* PDF Content */}
+          <div className="flex-1 overflow-auto p-4">
+            <LivePDFPreview
+              resumeData={resumeData}
+              templateId={selectedTemplate}
+              sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Unsaved Changes Warning Modal */}
+      {showUnsavedWarning && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-amber-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-neutral-900">Unsaved Changes</h3>
+            </div>
+            <p className="text-neutral-600 mb-6">
+              You have unsaved changes. Do you want to save before leaving?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={confirmNavigation}
+                className="px-4 py-2 text-neutral-600 hover:bg-neutral-100 rounded-lg transition-colors"
+              >
+                Discard
+              </button>
+              <button
+                onClick={async () => {
+                  await handleSave();
+                  confirmNavigation();
+                }}
+                className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                Save & Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Wrap App with CreditsProvider
+function AppWithProviders() {
+  return (
+    <CreditsProvider>
+      <App />
+    </CreditsProvider>
+  );
+}
+
+export default AppWithProviders;
