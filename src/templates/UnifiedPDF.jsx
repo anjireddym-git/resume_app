@@ -10,6 +10,61 @@ const getFormat = (sectionFormats, sectionId) => {
   return sectionFormats?.[sectionId] || SECTION_FORMATS[sectionId]?.default || 'default';
 };
 
+// Helper to get section title border styles based on border type
+const getSectionTitleBorderStyles = (borderType, borderColor, accentColor, borderWidth = 0.5) => {
+  switch (borderType) {
+    case 'none':
+      return {};
+    case 'bottom':
+      return {
+        paddingBottom: 4,
+        borderBottomWidth: borderWidth,
+        borderBottomColor: borderColor,
+      };
+    case 'double':
+      return {
+        paddingBottom: 6,
+        borderBottomWidth: borderWidth * 3,
+        borderBottomColor: borderColor,
+        borderBottomStyle: 'double',
+      };
+    case 'thick':
+      return {
+        paddingBottom: 4,
+        borderBottomWidth: 2,
+        borderBottomColor: borderColor,
+      };
+    case 'accent-left':
+      return {
+        paddingLeft: 8,
+        borderLeftWidth: 3,
+        borderLeftColor: accentColor,
+        paddingBottom: 2,
+      };
+    case 'top-bottom':
+      return {
+        paddingVertical: 4,
+        borderTopWidth: borderWidth,
+        borderTopColor: borderColor,
+        borderBottomWidth: borderWidth,
+        borderBottomColor: borderColor,
+      };
+    case 'dotted':
+      return {
+        paddingBottom: 4,
+        borderBottomWidth: borderWidth,
+        borderBottomColor: borderColor,
+        borderStyle: 'dotted',
+      };
+    default:
+      return {
+        paddingBottom: 4,
+        borderBottomWidth: borderWidth,
+        borderBottomColor: borderColor,
+      };
+  }
+};
+
 // Create a unified PDF template that accepts a theme config
 const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {} }) => {
   const data = resumeData || {};
@@ -22,7 +77,12 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
     header: { ...DEFAULT_THEME_CONFIG.header, ...themeConfig?.header },
     sectionTitle: { ...DEFAULT_THEME_CONFIG.sectionTitle, ...themeConfig?.sectionTitle },
     content: { ...DEFAULT_THEME_CONFIG.content, ...themeConfig?.content },
+    experience: { ...DEFAULT_THEME_CONFIG.experience, ...themeConfig?.experience },
+    ats: { ...DEFAULT_THEME_CONFIG.ats, ...themeConfig?.ats },
   }), [themeConfig]);
+
+  // Get date format from theme
+  const dateFormat = mergedTheme.content?.dateFormat || 'MMM YYYY';
   
   // Use provided section order or default
   const rawSections = Array.isArray(sectionOrder) && sectionOrder.length > 0 
@@ -40,6 +100,15 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
     const c = mergedTheme.colors;
     const h = mergedTheme.header;
     const st = mergedTheme.sectionTitle;
+    const exp = mergedTheme.experience;
+    
+    // Get section title border styles
+    const sectionBorderStyles = getSectionTitleBorderStyles(
+      st.border, 
+      c.border, 
+      c.accent,
+      st.borderWidth || 0.5
+    );
 
     return StyleSheet.create({
       page: {
@@ -53,7 +122,7 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
       header: {
         marginBottom: s.sectionMargin * 1.5,
         paddingBottom: s.sectionMargin,
-        borderBottomWidth: h.layout === 'centered' ? 0 : 2, // dynamic
+        borderBottomWidth: h.layout === 'centered' && !h.nameDivider ? 0 : (h.nameDivider ? 1 : 0),
         borderBottomColor: c.border,
         flexDirection: h.layout === 'twoColumn' ? 'row' : 'column',
         justifyContent: h.layout === 'twoColumn' ? 'space-between' : 'flex-start',
@@ -67,15 +136,25 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
         fontSize: t.fontSize * t.nameScale,
         fontWeight: h.nameBold ? 'bold' : 'normal',
         textTransform: h.nameUppercase ? 'uppercase' : 'none',
+        letterSpacing: h.nameLetterSpacing || 0,
         color: c.text,
-        marginBottom: 4,
+        marginBottom: h.nameDivider ? 8 : 4,
         textAlign: h.layout === 'centered' ? 'center' : 'left',
+      },
+      nameDivider: {
+        width: h.layout === 'centered' ? '40%' : '100%',
+        height: 1,
+        backgroundColor: c.border,
+        marginBottom: 8,
+        alignSelf: h.layout === 'centered' ? 'center' : 'flex-start',
       },
       title: {
         fontSize: t.fontSize * 1.1,
         color: c.secondary,
         textAlign: h.layout === 'centered' ? 'center' : 'left',
-        marginTop: 8,
+        marginTop: 4,
+        fontStyle: h.titleStyle === 'italic' ? 'italic' : 'normal',
+        textTransform: h.titleStyle === 'uppercase' ? 'uppercase' : 'none',
       },
       contactContainer: {
         flexDirection: h.layout === 'twoColumn' ? 'column' : 'row',
@@ -110,15 +189,12 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
         fontSize: t.fontSize * t.headingScale,
         fontWeight: st.bold ? 'bold' : 'normal',
         textTransform: st.uppercase ? 'uppercase' : 'none',
-        letterSpacing: st.uppercase ? 1 : 0,
+        letterSpacing: st.letterSpacing || (st.uppercase ? 1 : 0),
         marginBottom: s.itemMargin,
-        paddingBottom: st.border === 'bottom' ? 4 : 0,
-        borderBottomWidth: st.border === 'bottom' ? 0.5 : 0,
-        borderBottomColor: c.border,
-        color: c.secondary, // Or accent?
+        color: c.sectionTitleColor || c.secondary,
         textAlign: st.align,
-        backgroundColor: st.border === 'full' ? c.background : 'transparent', // Potential bg
         minPresenceAhead: 16,
+        ...sectionBorderStyles,
       },
       // Item styles
       item: {
@@ -130,6 +206,10 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
         alignItems: 'flex-start',
         marginBottom: 2,
         gap: 8,
+      },
+      itemRowVertical: {
+        flexDirection: 'column',
+        marginBottom: 2,
       },
       itemTitleWrap: {
         flex: 1,
@@ -151,6 +231,11 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
         flexShrink: 0,
         minWidth: 80,
       },
+      itemDateBelow: {
+        fontSize: t.fontSize,
+        color: c.secondary,
+        marginTop: 2,
+      },
       // Bullet list styles
       bulletList: {
         marginTop: 2,
@@ -165,7 +250,7 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
         fontSize: t.fontSize,
         color: c.accent, // Accent colored bullets
         marginRight: 6,
-        width: 8,
+        width: 10,
       },
       bulletText: {
         fontSize: t.fontSize,
@@ -219,6 +304,12 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
         fontSize: t.fontSize,
         color: c.text,
       },
+      // Summary
+      summary: {
+        fontSize: t.fontSize,
+        color: c.text,
+        lineHeight: t.lineHeight,
+      },
       // Simple Row for education/certs
       simpleRow: {
         flexDirection: 'row',
@@ -266,6 +357,7 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
   // HEADER
   const renderHeader = () => {
     const p = data.personalInfo || {};
+    const h = mergedTheme.header;
     
     const contactItems = [];
     if (p.location) contactItems.push({ text: p.location, isLink: false });
@@ -275,12 +367,13 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
     if (p.github) contactItems.push({ text: 'GitHub', isLink: true, href: p.github });
     
     // Separator - use mergedTheme instead of themeConfig
-    const separator = mergedTheme.header?.contactSeparator || '|';
+    const separator = h?.contactSeparator || '|';
 
     return (
       <View style={styles.header}>
         <View style={styles.headerContent}>
           <Text style={styles.name}>{p.name || 'Your Name'}</Text>
+          {h?.nameDivider && <View style={styles.nameDivider} />}
           {p.title && <Text style={styles.title}>{p.title}</Text>}
         </View>
 
@@ -441,6 +534,29 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
     if (!data.experience?.length) return null;
     
     const format = getFormat(sectionFormats, 'experience');
+    const exp_theme = mergedTheme.experience || {};
+    const content_theme = mergedTheme.content || {};
+    const showLocation = content_theme.showLocation !== false;
+    const isCompanyFirst = exp_theme.titlePosition === 'company-first';
+    const locationPlacement = exp_theme.locationPlacement || 'inline';
+    const datePosition = content_theme.dateAlign || 'right';
+    const showBullets = exp_theme.highlightBullets !== false;
+    
+    // Helper to format dates
+    const formatExpDate = (start, end) => {
+      const startFormatted = formatDate(start, dateFormat);
+      const endFormatted = formatDate(end, dateFormat) || 'Present';
+      return `${startFormatted} – ${endFormatted}`;
+    };
+    
+    // Helper to render location
+    const renderLocation = (location) => {
+      if (!showLocation || !location) return null;
+      if (locationPlacement === 'right') {
+        return null; // Will be rendered separately
+      }
+      return location;
+    };
     
     // Render experience based on format
     const renderExperienceContent = () => {
@@ -449,12 +565,15 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
           // Compact: no bullets, just key info
           return data.experience.map((exp, idx) => (
             <View key={idx} style={styles.compactItem}>
-              <View style={styles.itemRow}>
+              <View style={datePosition === 'below' ? styles.itemRowVertical : styles.itemRow}>
                 <Text style={styles.compactItemTitle}>
-                  {exp.position} at {exp.company}
+                  {isCompanyFirst 
+                    ? `${exp.company} - ${exp.position}`
+                    : `${exp.position} at ${exp.company}`
+                  }
                 </Text>
-                <Text style={styles.itemDate}>
-                  {formatDate(exp.startDate)} – {formatDate(exp.endDate) || 'Present'}
+                <Text style={datePosition === 'below' ? styles.itemDateBelow : styles.itemDate}>
+                  {formatExpDate(exp.startDate, exp.endDate)}
                 </Text>
               </View>
               {exp.highlights?.length > 0 && (
@@ -471,19 +590,53 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
           return data.experience.map((exp, idx) => (
             <View key={idx} style={styles.item}>
               <View style={styles.itemHeader}>
-                <View style={styles.itemRow}>
+                <View style={datePosition === 'below' ? styles.itemRowVertical : styles.itemRow}>
                   <View style={styles.itemTitleWrap}>
-                    <Text style={styles.itemTitle}>{exp.position}</Text>
-                    <Text style={styles.itemSubtitle}>
-                      {exp.company}{exp.location ? `, ${exp.location}` : ''}
-                    </Text>
+                    {isCompanyFirst ? (
+                      <>
+                        <Text style={styles.itemTitle}>{exp.company}</Text>
+                        <Text style={styles.itemSubtitle}>
+                          {exp.position}
+                          {locationPlacement === 'inline' && renderLocation(exp.location) 
+                            ? ` • ${exp.location}` 
+                            : ''
+                          }
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.itemTitle}>{exp.position}</Text>
+                        <Text style={styles.itemSubtitle}>
+                          {exp.company}
+                          {locationPlacement === 'inline' && renderLocation(exp.location) 
+                            ? `, ${exp.location}` 
+                            : ''
+                          }
+                        </Text>
+                      </>
+                    )}
+                    {locationPlacement === 'below' && showLocation && exp.location && (
+                      <Text style={styles.itemSubtitle}>{exp.location}</Text>
+                    )}
                   </View>
-                  <Text style={styles.itemDate}>
-                    {formatDate(exp.startDate)} – {formatDate(exp.endDate) || 'Present'}
-                  </Text>
+                  {datePosition === 'right' && (
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={styles.itemDate}>
+                        {formatExpDate(exp.startDate, exp.endDate)}
+                      </Text>
+                      {locationPlacement === 'right' && showLocation && exp.location && (
+                        <Text style={styles.itemSubtitle}>{exp.location}</Text>
+                      )}
+                    </View>
+                  )}
                 </View>
+                {datePosition === 'below' && (
+                  <Text style={styles.itemDateBelow}>
+                    {formatExpDate(exp.startDate, exp.endDate)}
+                  </Text>
+                )}
               </View>
-              {renderBullets(exp.highlights)}
+              {showBullets && renderBullets(exp.highlights)}
             </View>
           ));
       }
@@ -517,7 +670,7 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
                   {edu.institution}{edu.gpa ? ` • GPA: ${edu.gpa}` : ''}
                 </Text>
               </View>
-              <Text style={styles.simpleRowRight}>{formatDate(edu.graduationDate)}</Text>
+              <Text style={styles.simpleRowRight}>{formatDate(edu.graduationDate, dateFormat)}</Text>
             </View>
           ));
         
@@ -532,7 +685,7 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
                   </Text>
                   <Text style={styles.itemSubtitle}>{edu.institution}</Text>
                 </View>
-                <Text style={styles.itemDate}>{formatDate(edu.graduationDate)}</Text>
+                <Text style={styles.itemDate}>{formatDate(edu.graduationDate, dateFormat)}</Text>
               </View>
               {edu.gpa && (
                 <Text style={styles.itemSubtitle}>GPA: {edu.gpa}</Text>
@@ -656,6 +809,10 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
     if (!data.internships?.length) return null;
     
     const format = getFormat(sectionFormats, 'internships');
+    const exp_theme = mergedTheme.experience || {};
+    const content_theme = mergedTheme.content || {};
+    const showLocation = content_theme.showLocation !== false;
+    const isCompanyFirst = exp_theme.titlePosition === 'company-first';
     
     const renderInternshipsContent = () => {
       switch (format) {
@@ -664,10 +821,13 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
             <View key={idx} style={styles.compactItem}>
               <View style={styles.itemRow}>
                 <Text style={styles.compactItemTitle}>
-                  {intern.position} at {intern.company}
+                  {isCompanyFirst 
+                    ? `${intern.company} - ${intern.position}`
+                    : `${intern.position} at ${intern.company}`
+                  }
                 </Text>
                 <Text style={styles.itemDate}>
-                  {intern.duration || `${formatDate(intern.startDate)} – ${formatDate(intern.endDate)}`}
+                  {intern.duration || `${formatDate(intern.startDate, dateFormat)} – ${formatDate(intern.endDate, dateFormat)}`}
                 </Text>
               </View>
               {intern.highlights?.length > 0 && (
@@ -684,13 +844,26 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
             <View key={idx} style={styles.item}>
               <View style={styles.itemRow}>
                 <View style={styles.itemTitleWrap}>
-                  <Text style={styles.itemTitle}>{intern.position}</Text>
-                  <Text style={styles.itemSubtitle}>
-                    {intern.company}{intern.location ? `, ${intern.location}` : ''}
-                  </Text>
+                  {isCompanyFirst ? (
+                    <>
+                      <Text style={styles.itemTitle}>{intern.company}</Text>
+                      <Text style={styles.itemSubtitle}>
+                        {intern.position}
+                        {showLocation && intern.location ? ` • ${intern.location}` : ''}
+                      </Text>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.itemTitle}>{intern.position}</Text>
+                      <Text style={styles.itemSubtitle}>
+                        {intern.company}
+                        {showLocation && intern.location ? `, ${intern.location}` : ''}
+                      </Text>
+                    </>
+                  )}
                 </View>
                 <Text style={styles.itemDate}>
-                  {intern.duration || `${formatDate(intern.startDate)} – ${formatDate(intern.endDate)}`}
+                  {intern.duration || `${formatDate(intern.startDate, dateFormat)} – ${formatDate(intern.endDate, dateFormat)}`}
                 </Text>
               </View>
               {renderBullets(intern.highlights)}

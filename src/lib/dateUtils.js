@@ -4,10 +4,18 @@
  * Display format: MMM YYYY (e.g., "Jan 2020")
  */
 
-const MONTHS = [
+const MONTHS_SHORT = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
 ];
+
+const MONTHS_FULL = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+
+// Keep MONTHS for backward compatibility
+const MONTHS = MONTHS_SHORT;
 
 const MONTH_MAP = {
   'jan': 0, 'january': 0,
@@ -91,15 +99,44 @@ export function toStorageFormat(dateStr) {
 /**
  * Convert a date string to display format (MMM YYYY).
  * Returns the original string if parsing fails or if it's "Present".
+ * @param {string} dateStr - The date string to format
+ * @param {string} format - The format to use: 'MMM YYYY', 'MM/YYYY', 'MMMM YYYY', 'YYYY'
  */
-export function formatDate(dateStr) {
+export function formatDate(dateStr, format = 'MMM YYYY') {
   if (!dateStr) return '';
   if (isPresent(dateStr)) return 'Present';
   
   const parsed = parseDate(dateStr);
   if (!parsed) return dateStr; // Return original if can't parse
   
-  return `${MONTHS[parsed.month]} ${parsed.year}`;
+  switch (format) {
+    case 'MM/YYYY':
+      return `${String(parsed.month + 1).padStart(2, '0')}/${parsed.year}`;
+    case 'MMMM YYYY':
+      return `${MONTHS_FULL[parsed.month]} ${parsed.year}`;
+    case 'YYYY':
+      return `${parsed.year}`;
+    case 'MMM YYYY':
+    default:
+      return `${MONTHS_SHORT[parsed.month]} ${parsed.year}`;
+  }
+}
+
+/**
+ * Format a date range with the specified format
+ * @param {string} startDate - Start date string
+ * @param {string} endDate - End date string (can be 'Present')
+ * @param {string} format - The format to use
+ */
+export function formatDateRange(startDate, endDate, format = 'MMM YYYY') {
+  const start = formatDate(startDate, format);
+  const end = formatDate(endDate, format);
+  
+  if (!start && !end) return '';
+  if (!start) return end;
+  if (!end) return start;
+  
+  return `${start} – ${end}`;
 }
 
 /**
