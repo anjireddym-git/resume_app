@@ -1,13 +1,17 @@
 import React, { useState, useRef } from 'react';
-import { X, Upload, Loader2, FileText } from 'lucide-react';
+import { X, Upload, Loader2, FileText, ArrowLeft, ArrowRight, Check } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { createResumeGroup, createResume } from '../services/resumeService';
 import { extractResumeFromFile } from '../services/documentParser';
 import { geminiService } from '../services/geminiService';
+import ThemeEditor from './ThemeEditor';
+import UnifiedPDF from '../templates/UnifiedPDF';
+import { PDFViewer } from '@react-pdf/renderer';
+import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 
 const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
   const { user } = useAuth();
-  const [step, setStep] = useState('name'); // 'name' | 'resume' | 'creating'
+  const [step, setStep] = useState('name'); // 'name' | 'resume' | 'design' | 'creating'
   const [isLoading, setIsLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const fileInputRef = useRef(null);
@@ -15,6 +19,7 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
   // Form data
   const [groupName, setGroupName] = useState('');
   const [resumeData, setResumeData] = useState(null);
+  const [themeConfig, setThemeConfig] = useState(DEFAULT_THEME_CONFIG);
   const [error, setError] = useState('');
 
   const handleFileUpload = async (e) => {
@@ -63,9 +68,11 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
         personalInfo: sharedData.personalInfo,
         experience: sharedData.experience,
         education: sharedData.education,
+        themeConfig: themeConfig,
       });
+
       
-      // Create first resume with full custom data
+      // Create first resume with full custom data AND theme config
       await createResume(user.uid, groupId, {
         name: 'Base Resume',
         summary: resumeData.summary || '',
@@ -79,13 +86,14 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
         internships: resumeData.internships || [],
         hackathons: resumeData.hackathons || [],
       });
+
       
       onComplete(groupId);
       handleClose();
     } catch (err) {
       console.error('Failed to create group:', err);
       setError('Failed to create group. Please try again.');
-      setStep('resume');
+      setStep('design'); // Go back to design step on error
     } finally {
       setIsLoading(false);
     }
@@ -95,18 +103,27 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
     setStep('name');
     setGroupName('');
     setResumeData(null);
+    setThemeConfig(DEFAULT_THEME_CONFIG);
     setError('');
     onClose();
   };
 
   if (!isOpen) return null;
 
+  // Determine modal width based on step
+  const getModalWidth = () => {
+    if (step === 'design') return 'max-w-6xl h-[90vh]';
+    return 'max-w-md max-h-[95vh]';
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md max-h-[95vh] overflow-hidden flex flex-col">
+      <div className={`bg-white rounded-2xl w-full overflow-hidden flex flex-col transition-all duration-300 ${getModalWidth()}`}>
         {/* Header */}
         <div className="p-4 border-b border-neutral-200 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-neutral-900">Create Resume Group</h2>
+          <h2 className="text-lg font-semibold text-neutral-900">
+            {step === 'design' ? 'Customize Design' : 'Create Resume Group'}
+          </h2>
           <button onClick={handleClose} className="p-2 text-neutral-400 hover:text-neutral-600 rounded-lg">
             <X className="w-5 h-5" />
           </button>
@@ -143,9 +160,9 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
               <button
                 onClick={() => setStep('resume')}
                 disabled={!groupName.trim()}
-                className="w-full h-10 bg-neutral-900 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                className="w-full h-10 bg-neutral-900 text-white rounded-lg text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                Continue
+                Next <ArrowRight className="w-4 h-4" />
               </button>
             </div>
           )}
@@ -212,26 +229,64 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
               <div className="flex gap-2">
                 <button
                   onClick={() => setStep('name')}
-                  className="flex-1 h-10 border border-neutral-200 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-50"
+                  className="flex-1 h-10 border border-neutral-200 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-50 flex items-center justify-center gap-2"
                 >
-                  Back
+                  <ArrowLeft className="w-4 h-4" /> Back
                 </button>
                 <button
-                  onClick={handleComplete}
+                  onClick={() => setStep('design')}
                   disabled={!resumeData}
-                  className="flex-1 h-10 bg-neutral-900 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                  className="flex-1 h-10 bg-neutral-900 text-white rounded-lg text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-2"
                 >
-                  Create Group
+                  Next: Design <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
           )}
 
-          {/* Step 3: Creating */}
+          {/* Step 3: Design */}
+          {step === 'design' && (
+            <div className="flex flex-col h-full gap-4">
+              <div className="flex-1 min-h-0 flex gap-4">
+                {/* Editor Pane */}
+                <div className="w-1/3 min-w-[320px] flex flex-col">
+                  <ThemeEditor config={themeConfig} onChange={setThemeConfig} />
+                </div>
+                
+                {/* Preview Pane */}
+                <div className="flex-1 bg-neutral-100 rounded-lg overflow-hidden border border-neutral-200">
+                  <PDFViewer width="100%" height="100%" className="border-0">
+                    <UnifiedPDF 
+                      resumeData={resumeData}
+                      themeConfig={themeConfig}
+                    />
+                  </PDFViewer>
+                </div>
+              </div>
+
+              <div className="flex justify-between items-center pt-2 border-t border-neutral-200">
+                <button
+                   onClick={() => setStep('resume')}
+                   className="px-4 py-2 border border-neutral-200 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-50 flex items-center gap-2"
+                >
+                   <ArrowLeft className="w-4 h-4" /> Back
+                </button>
+                <button
+                  onClick={handleComplete}
+                  className="px-6 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 flex items-center gap-2"
+                >
+                  Create Group <Check className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 4: Creating */}
           {step === 'creating' && (
-            <div className="py-8 text-center">
-              <Loader2 className="w-8 h-8 text-neutral-400 animate-spin mx-auto mb-3" />
-              <p className="text-sm text-neutral-600">Creating your resume group...</p>
+            <div className="py-20 text-center flex flex-col items-center justify-center h-full">
+              <Loader2 className="w-10 h-10 text-neutral-900 animate-spin mb-4" />
+              <h3 className="text-lg font-medium text-neutral-900 mb-2">Creating your resume group...</h3>
+              <p className="text-sm text-neutral-500">Setting up your shared data and applying your theme.</p>
             </div>
           )}
         </div>
@@ -241,3 +296,4 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
 };
 
 export default CreateGroupModal;
+

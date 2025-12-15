@@ -15,9 +15,11 @@ import LivePDFPreview from './components/LivePDFPreview';
 import SectionReorder from './components/SectionReorder';
 import MatchAnalysis from './components/MatchAnalysis';
 import ActionButtons from './components/ActionButtons';
+import ThemeCustomizationModal from './components/ThemeCustomizationModal';
 import ApiKeyInput from './components/ApiKeyInput';
 import SplashScreen from './components/SplashScreen';
 import CreditsDisplay from './components/CreditsDisplay';
+import ResizableSplitPane from './components/ResizableSplitPane';
 import { geminiService } from './services/geminiService';
 import { TEMPLATES, DEFAULT_SECTION_ORDER } from './config/templates';
 import { 
@@ -29,7 +31,8 @@ import {
   buildFullResume,
   createVersionSnapshot,
   updateGroupSharedData,
-  updateResumeSectionFormat
+  updateResumeSectionFormat,
+  getResumesInGroup
 } from './services/resumeService';
 import useResumeEditor from './hooks/useResumeEditor';
 
@@ -53,6 +56,13 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showMobilePDFPreview, setShowMobilePDFPreview] = useState(false);
+  
+  // Theme Design Modal State
+  const [showDesignModal, setShowDesignModal] = useState(false);
+  const [designResumeData, setDesignResumeData] = useState(null);
+  const [designGroup, setDesignGroup] = useState(null);
+
+
   
   // Current selection
   const [selectedGroupId, setSelectedGroupId] = useState(null);
@@ -471,6 +481,66 @@ function App() {
     setRefreshTrigger(prev => prev + 1);
   };
 
+  const handleEditDesign = async (group, resumeId) => {
+    // We need both the group (for theme) and the resume (for content preview)
+    // If no resumeId is passed, try to find the first one or create a dummy one
+    
+    let targetResume = null;
+    
+    try {
+      if (resumeId) {
+        if (selectedResumeId === resumeId && resumeData) {
+          targetResume = resumeData;
+        } else {
+          // Fetch specific resume
+           const resume = await getResume(resumeId);
+           targetResume = buildFullResume(group, resume);
+        }
+      } else {
+         // Try to get first resume in group to use as preview
+         const resumes = await getResumesInGroup(group.id, user.uid);
+         if (resumes.length > 0) {
+            targetResume = buildFullResume(group, resumes[0]);
+         } else {
+            // No resumes in group? Just use placeholder data or shared data
+            targetResume = {
+                personalInfo: group.sharedData?.personalInfo || {},
+                experience: group.sharedData?.experience || [],
+                education: group.sharedData?.education || [],
+            }
+         }
+      }
+
+      setDesignGroup(group);
+      setDesignResumeData(targetResume);
+      setShowDesignModal(true);
+    } catch (err) {
+      console.error('Failed to load design context:', err);
+    }
+  };
+
+  const handleDesignUpdate = async () => {
+    setRefreshTrigger(prev => prev + 1);
+    
+    // Always try to reload current group if we have one selected
+    // This ensures the PDF preview updates with new theme
+    if (selectedGroupId && designGroup?.id) {
+        try {
+          // Reload the group that was just designed
+          const updatedGroup = await getResumeGroup(designGroup.id);
+          
+          // If we're viewing the same group, update currentGroup
+          if (selectedGroupId === designGroup.id) {
+            setCurrentGroup(updatedGroup);
+          }
+        } catch (err) {
+          console.error('Failed to reload group:', err);
+        }
+    }
+  };
+
+
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#fafafa] flex items-center justify-center">
@@ -598,6 +668,7 @@ function App() {
             }}
             onEditShared={(group) => { handleEditShared(group); setSidebarOpen(false); }}
             onAutoPopulate={(group) => { handleAutoPopulate(group); setSidebarOpen(false); }}
+            onEditDesign={(group, resumeId) => { handleEditDesign(group, resumeId); setSidebarOpen(false); }}
             refreshTrigger={refreshTrigger}
           />
         </div>
@@ -687,14 +758,14 @@ function App() {
                     <ActionButtons
                       resumeRef={resumeRef}
                       resumeData={resumeData}
-                      templateId={selectedTemplate}
+                      themeConfig={currentGroup?.themeConfig}
                       sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
                       hasChanges={hasUnsavedChanges}
                     />
                   </div>
                 </div>
 
-                {/* Content Area */}
+                {/* Content Area - Resizable Split Pane (desktop) / Editor only (mobile) */}
                 <div className="flex-1 flex overflow-hidden">
                   {/* Layout Panel (collapsible) */}
                   {showLayoutPanel && (
@@ -716,29 +787,49 @@ function App() {
                     </div>
                   )}
 
-                  {/* Editor */}
-                  <div className="flex-1 overflow-hidden">
+                  {/* Desktop: Resizable Split Pane */}
+                  <div className="hidden lg:flex flex-1 overflow-hidden">
+                    <ResizableSplitPane
+                      defaultLeftWidth={55}
+                      minLeftWidth={30}
+                      maxLeftWidth={80}
+                      leftLabel="Editor"
+                      rightLabel="Preview"
+                      left={
+                        <div className="flex-1 overflow-hidden bg-white">
+                          <ResumeEditor
+                            resumeData={resumeData}
+                            onUpdate={handleFieldUpdate}
+                            onFormatChange={handleFormatChange}
+                          />
+                        </div>
+                      }
+                      right={
+                        <div className="flex-1 flex flex-col bg-neutral-800 p-4">
+                          <div className="text-xs text-neutral-400 mb-2 flex items-center justify-between">
+                            <span>PDF Preview</span>
+                            <span className="text-neutral-500">{TEMPLATES[selectedTemplate]?.name}</span>
+                          </div>
+                          <div className="flex-1 rounded-lg overflow-hidden">
+                            <LivePDFPreview
+                              resumeData={resumeData}
+                              themeConfig={currentGroup?.themeConfig}
+                              sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+                            />
+                          </div>
+                        </div>
+                      }
+                    />
+                  </div>
+
+                  {/* Mobile: Editor only */}
+                  <div className="lg:hidden flex-1 overflow-hidden">
                     <ResumeEditor
                       resumeData={resumeData}
                       onUpdate={handleFieldUpdate}
                       onFormatChange={handleFormatChange}
                     />
                   </div>
-                </div>
-              </div>
-
-              {/* Right Panel - Live PDF Preview (hidden on mobile) */}
-              <div className="hidden lg:flex w-[45%] border-l border-neutral-200 bg-neutral-800 p-4 flex-col flex-shrink-0">
-                <div className="text-xs text-neutral-400 mb-2 flex items-center justify-between">
-                  <span>PDF Preview</span>
-                  <span className="text-neutral-500">{TEMPLATES[selectedTemplate]?.name}</span>
-                </div>
-                <div className="flex-1 rounded-lg overflow-hidden">
-                  <LivePDFPreview
-                    resumeData={resumeData}
-                    templateId={selectedTemplate}
-                    sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
-                  />
                 </div>
               </div>
 
@@ -799,7 +890,16 @@ function App() {
         group={autoPopulateGroup}
         onComplete={handleAutoPopulateComplete}
       />
-      
+
+      <ThemeCustomizationModal
+        isOpen={showDesignModal}
+        onClose={() => setShowDesignModal(false)}
+        resumeData={designResumeData}
+        group={designGroup}
+        onUpdate={handleDesignUpdate}
+      />
+
+
       <JobDescriptionModal
         isOpen={showJobModal}
         onClose={() => setShowJobModal(false)}
@@ -847,7 +947,7 @@ function App() {
           <div className="flex-1 overflow-auto p-4">
             <LivePDFPreview
               resumeData={resumeData}
-              templateId={selectedTemplate}
+              themeConfig={currentGroup?.themeConfig}
               sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
             />
           </div>

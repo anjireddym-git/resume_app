@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Plus, Trash2, X, GripVertical, ChevronUp, Edit2, List, AlignLeft, LayoutList, Tags, Columns2, FileText, Layers, AlignCenter, AlignJustify, Rows3 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, Trash2, X, GripVertical, ChevronUp, Edit2, List, AlignLeft, LayoutList, Tags, Columns2, FileText, Layers, AlignCenter, AlignJustify, Rows3, Wand2, Sparkles, Loader2 } from 'lucide-react';
 import { SECTION_FORMATS } from '../config/sectionFormats';
+import { geminiService } from '../services/geminiService';
 
 // Icon mapping for format buttons
 const ICON_MAP = {
@@ -130,8 +131,117 @@ const ExpandableRow = ({ title, subtitle, isExpanded, onToggle, children, onRemo
   </div>
 );
 
+// AI Edit Modal
+const AIEditModal = ({ isOpen, onClose, onConfirm, initialValue, fieldType }) => {
+  const [prompt, setPrompt] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [preview, setPreview] = useState(null);
+
+  if (!isOpen) return null;
+
+  const handleGenerate = async () => {
+    if (!prompt.trim()) return;
+    setLoading(true);
+    try {
+      const result = await geminiService.editFieldWithAI(initialValue, prompt, fieldType);
+      setPreview(result);
+    } catch (error) {
+      alert(error.message); // Simple error handling for now
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApply = () => {
+    if (preview) {
+      onConfirm(preview);
+      onClose();
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md overflow-hidden">
+        <div className="p-4 border-b border-neutral-100 flex items-center justify-between bg-neutral-50/50">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-purple-600" />
+            <h3 className="font-semibold text-neutral-800">Edit with AI</h3>
+          </div>
+          <button onClick={onClose} className="text-neutral-400 hover:text-neutral-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        
+        <div className="p-4 space-y-4">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-neutral-500">Original Text</label>
+            <div className="bg-neutral-50 p-2 rounded border border-neutral-100 text-xs text-neutral-600 max-h-24 overflow-y-auto">
+              {initialValue || <em className="text-neutral-400">Empty</em>}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-neutral-700">How should we change it?</label>
+            <div className="relative">
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="e.g., Make it more concise, Add metrics, Fix grammar..."
+                className="w-full text-sm border border-neutral-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                rows={3}
+                autoFocus
+              />
+              <div className="absolute bottom-2 right-2 flex items-center gap-1 text-[10px] text-neutral-400">
+                <Sparkles className="w-3 h-3" />
+                <span>1 Credit</span>
+              </div>
+            </div>
+          </div>
+
+          {preview && (
+            <div className="space-y-1 animate-in fade-in slide-in-from-bottom-2 duration-300">
+              <label className="text-xs font-medium text-purple-600">Preview</label>
+              <div className="bg-purple-50 p-3 rounded border border-purple-100 text-sm text-neutral-800">
+                {preview}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="p-4 border-t border-neutral-100 flex justify-end gap-2 bg-neutral-50/50">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs font-medium text-neutral-600 hover:text-neutral-800 hover:bg-neutral-100 rounded"
+          >
+            Cancel
+          </button>
+          {preview ? (
+            <button
+              onClick={handleApply}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded shadow-sm flex items-center gap-1.5"
+            >
+              Apply Change
+            </button>
+          ) : (
+            <button
+              onClick={handleGenerate}
+              disabled={loading || !prompt.trim()}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-neutral-900 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-sm flex items-center gap-1.5"
+            >
+              {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
+              Generate
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Compact resizable text input (auto-grows with content, manually resizable)
-const CompactInput = ({ label, value, onChange, placeholder, multiline = false }) => {
+const CompactInput = ({ label, value, onChange, placeholder, multiline = false, enableAI = false, fieldType = 'general' }) => {
+  const [showAI, setShowAI] = useState(false);
+
   // Auto-resize handler
   const handleInput = (e) => {
     e.target.style.height = 'auto';
@@ -139,22 +249,44 @@ const CompactInput = ({ label, value, onChange, placeholder, multiline = false }
   };
   
   return (
-    <div className="flex items-start gap-2">
+    <div className="flex items-start gap-2 group/input relative">
       <label className="text-xs text-neutral-400 w-20 flex-shrink-0 pt-1">{label}</label>
-      <textarea
-        value={value || ''}
-        onChange={(e) => onChange(e.target.value)}
-        onInput={handleInput}
-        placeholder={placeholder}
-        rows={1}
-        className="flex-1 text-xs text-neutral-700 border border-neutral-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-neutral-300 resize-y min-h-[26px]"
-      />
+      <div className="flex-1 relative">
+        <textarea
+          value={value || ''}
+          onChange={(e) => onChange(e.target.value)}
+          onInput={handleInput}
+          placeholder={placeholder}
+          rows={1}
+          className="w-full text-xs text-neutral-700 border border-neutral-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-neutral-300 resize-y min-h-[26px] pr-8"
+        />
+        {enableAI && (
+          <button 
+            onClick={() => setShowAI(true)}
+            className="absolute right-1 top-1 p-0.5 text-neutral-300 hover:text-purple-600 opacity-0 group-hover/input:opacity-100 transition-all hover:bg-purple-50 rounded"
+            title="Edit with AI"
+          >
+            <Wand2 className="w-3 h-3" />
+          </button>
+        )}
+      </div>
+      {showAI && (
+        <AIEditModal
+          isOpen={showAI}
+          onClose={() => setShowAI(false)}
+          onConfirm={(newValue) => onChange(newValue)}
+          initialValue={value}
+          fieldType={fieldType}
+        />
+      )}
     </div>
   );
 };
 
 // Compact resizable textarea (auto-grows with content, manually resizable)
-const CompactTextarea = ({ label, value, onChange, placeholder, rows = 2 }) => {
+const CompactTextarea = ({ label, value, onChange, placeholder, rows = 2, enableAI = false, fieldType = 'general' }) => {
+  const [showAI, setShowAI] = useState(false);
+
   // Auto-resize handler
   const handleInput = (e) => {
     e.target.style.height = 'auto';
@@ -162,16 +294,36 @@ const CompactTextarea = ({ label, value, onChange, placeholder, rows = 2 }) => {
   };
   
   return (
-    <div>
+    <div className="group/input relative">
       {label && <label className="text-xs text-neutral-400 mb-1 block">{label}</label>}
-      <textarea
-        value={value || ''}
-        onChange={(e) => onChange(e.target.value)}
-        onInput={handleInput}
-        placeholder={placeholder}
-        rows={rows}
-        className="w-full text-xs text-neutral-700 border border-neutral-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-neutral-300 resize-y min-h-[40px]"
-      />
+      <div className="relative">
+        <textarea
+          value={value || ''}
+          onChange={(e) => onChange(e.target.value)}
+          onInput={handleInput}
+          placeholder={placeholder}
+          rows={rows}
+          className="w-full text-xs text-neutral-700 border border-neutral-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-neutral-300 resize-y min-h-[40px] pr-8"
+        />
+        {enableAI && (
+          <button 
+            onClick={() => setShowAI(true)}
+            className="absolute right-1 top-1 p-0.5 text-neutral-300 hover:text-purple-600 opacity-0 group-hover/input:opacity-100 transition-all hover:bg-purple-50 rounded"
+            title="Edit with AI"
+          >
+            <Wand2 className="w-3 h-3" />
+          </button>
+        )}
+      </div>
+      {showAI && (
+        <AIEditModal
+          isOpen={showAI}
+          onClose={() => setShowAI(false)}
+          onConfirm={(newValue) => onChange(newValue)}
+          initialValue={value}
+          fieldType={fieldType}
+        />
+      )}
     </div>
   );
 };
@@ -347,6 +499,8 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
               : "Brief professional summary..."
             }
             rows={4}
+            enableAI={true}
+            fieldType="summary"
           />
           <p className="text-xs text-neutral-400 italic">
             {getFormat('summary') === 'points' 
@@ -462,10 +616,10 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
                   isLast={idx === arr.length - 1}
               >
                 <div className="space-y-1.5">
-                  <CompactInput label="Position" value={exp.position} onChange={(v) => updateArrayItem('experience', idx, 'position', v)} placeholder="Software Engineer" />
+                  <CompactInput label="Position" value={exp.position} onChange={(v) => updateArrayItem('experience', idx, 'position', v)} placeholder="Software Engineer" enableAI={true} fieldType="experience_position" />
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-neutral-400 w-20">Company</span>
-                    <span className="text-neutral-500">{exp.company || '-'}</span>
+                    <CompactInput value={exp.company} onChange={(v) => updateArrayItem('experience', idx, 'company', v)} placeholder="Company" className="flex-1 !border-b !rounded-none !px-0 !py-0" enableAI={true} fieldType="experience_company" />
                   </div>
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-neutral-400 w-20">Duration</span>
@@ -477,6 +631,8 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
                     onChange={(v) => updateArrayItem('experience', idx, 'highlights', v.split('\n').filter(Boolean))}
                     placeholder="• Led team of 5 engineers"
                     rows={3}
+                    enableAI={true}
+                    fieldType="experience_highlight"
                   />
                 </div>
               </ExpandableRow>
@@ -573,10 +729,10 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
                 isLast={idx === arr.length - 1}
               >
                 <div className="space-y-1.5">
-                  <CompactInput label="Name" value={proj.name} onChange={(v) => updateArrayItem('projects', idx, 'name', v)} placeholder="Project Name" />
-                  <CompactTextarea label="Description" value={proj.description} onChange={(v) => updateArrayItem('projects', idx, 'description', v)} placeholder="Brief description..." rows={2} />
-                  <CompactInput label="Tech" value={proj.technologies?.join(', ')} onChange={(v) => updateArrayItem('projects', idx, 'technologies', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="React, Node.js" />
-                  <CompactTextarea label="Highlights" value={proj.highlights?.join('\n')} onChange={(v) => updateArrayItem('projects', idx, 'highlights', v.split('\n').filter(Boolean))} placeholder="• Key feature..." rows={2} />
+                  <CompactInput label="Name" value={proj.name} onChange={(v) => updateArrayItem('projects', idx, 'name', v)} placeholder="Project Name" enableAI={true} fieldType="general" />
+                  <CompactTextarea label="Description" value={proj.description} onChange={(v) => updateArrayItem('projects', idx, 'description', v)} placeholder="Brief description..." rows={2} enableAI={true} fieldType="project_description" />
+                  <CompactInput label="Tech" value={proj.technologies?.join(', ')} onChange={(v) => updateArrayItem('projects', idx, 'technologies', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="React, Node.js" enableAI={true} fieldType="skill" />
+                  <CompactTextarea label="Highlights" value={proj.highlights?.join('\n')} onChange={(v) => updateArrayItem('projects', idx, 'highlights', v.split('\n').filter(Boolean))} placeholder="• Key feature..." rows={2} enableAI={true} fieldType="project_description" />
                 </div>
               </ExpandableRow>
             ))

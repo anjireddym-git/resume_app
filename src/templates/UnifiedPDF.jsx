@@ -11,8 +11,18 @@ const getFormat = (sectionFormats, sectionId) => {
 };
 
 // Create a unified PDF template that accepts a theme config
-const UnifiedPDF = ({ resumeData, themeConfig = DEFAULT_THEME_CONFIG, sectionOrder, sectionFormats = {} }) => {
+const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {} }) => {
   const data = resumeData || {};
+  
+  // Merge with defaults to ensure all values exist
+  const mergedTheme = useMemo(() => ({
+    typography: { ...DEFAULT_THEME_CONFIG.typography, ...themeConfig?.typography },
+    spacing: { ...DEFAULT_THEME_CONFIG.spacing, ...themeConfig?.spacing },
+    colors: { ...DEFAULT_THEME_CONFIG.colors, ...themeConfig?.colors },
+    header: { ...DEFAULT_THEME_CONFIG.header, ...themeConfig?.header },
+    sectionTitle: { ...DEFAULT_THEME_CONFIG.sectionTitle, ...themeConfig?.sectionTitle },
+    content: { ...DEFAULT_THEME_CONFIG.content, ...themeConfig?.content },
+  }), [themeConfig]);
   
   // Use provided section order or default
   const rawSections = Array.isArray(sectionOrder) && sectionOrder.length > 0 
@@ -25,11 +35,11 @@ const UnifiedPDF = ({ resumeData, themeConfig = DEFAULT_THEME_CONFIG, sectionOrd
 
   // Dynamic Styles Generator
   const styles = useMemo(() => {
-    const t = themeConfig.typography || DEFAULT_THEME_CONFIG.typography;
-    const s = themeConfig.spacing || DEFAULT_THEME_CONFIG.spacing;
-    const c = themeConfig.colors || DEFAULT_THEME_CONFIG.colors;
-    const h = themeConfig.header || DEFAULT_THEME_CONFIG.header;
-    const st = themeConfig.sectionTitle || DEFAULT_THEME_CONFIG.sectionTitle;
+    const t = mergedTheme.typography;
+    const s = mergedTheme.spacing;
+    const c = mergedTheme.colors;
+    const h = mergedTheme.header;
+    const st = mergedTheme.sectionTitle;
 
     return StyleSheet.create({
       page: {
@@ -65,8 +75,7 @@ const UnifiedPDF = ({ resumeData, themeConfig = DEFAULT_THEME_CONFIG, sectionOrd
         fontSize: t.fontSize * 1.1,
         color: c.secondary,
         textAlign: h.layout === 'centered' ? 'center' : 'left',
-        marginTop: 2,
-        marginBottom: 6,
+        marginTop: 8,
       },
       contactContainer: {
         flexDirection: h.layout === 'twoColumn' ? 'column' : 'row',
@@ -109,7 +118,7 @@ const UnifiedPDF = ({ resumeData, themeConfig = DEFAULT_THEME_CONFIG, sectionOrd
         color: c.secondary, // Or accent?
         textAlign: st.align,
         backgroundColor: st.border === 'full' ? c.background : 'transparent', // Potential bg
-        minPresenceAhead: 40,
+        minPresenceAhead: 16,
       },
       // Item styles
       item: {
@@ -235,12 +244,12 @@ const UnifiedPDF = ({ resumeData, themeConfig = DEFAULT_THEME_CONFIG, sectionOrd
         textAlign: 'right',
       }
     });
-  }, [themeConfig]);
+  }, [mergedTheme]);
 
   // Helper: Render bullet points
   const renderBullets = (items) => {
     if (!items?.length) return null;
-    const bulletChar = themeConfig.content?.bulletStyle || '•';
+    const bulletChar = mergedTheme.content?.bulletStyle || '•';
     
     return (
       <View style={styles.bulletList}>
@@ -265,8 +274,8 @@ const UnifiedPDF = ({ resumeData, themeConfig = DEFAULT_THEME_CONFIG, sectionOrd
     if (p.linkedin) contactItems.push({ text: 'LinkedIn', isLink: true, href: p.linkedin });
     if (p.github) contactItems.push({ text: 'GitHub', isLink: true, href: p.github });
     
-    // Separator
-    const separator = themeConfig.header?.contactSeparator || '|';
+    // Separator - use mergedTheme instead of themeConfig
+    const separator = mergedTheme.header?.contactSeparator || '|';
 
     return (
       <View style={styles.header}>
@@ -515,7 +524,7 @@ const UnifiedPDF = ({ resumeData, themeConfig = DEFAULT_THEME_CONFIG, sectionOrd
         case 'detailed':
         default:
           return data.education.map((edu, idx) => (
-            <View key={idx} style={styles.item}>
+            <View key={idx} style={styles.item} wrap={false}>
               <View style={styles.itemRow}>
                 <View style={styles.itemTitleWrap}>
                   <Text style={styles.itemTitle}>

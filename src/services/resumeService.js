@@ -1,18 +1,20 @@
-import { 
-  collection, 
-  doc, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  getDoc, 
-  getDocs, 
-  query, 
-  where, 
-  orderBy, 
+import {
+  collection,
+  doc,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
   serverTimestamp,
-  increment
+  increment,
+  limit
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 
 // ============ RESUME GROUPS ============
 
@@ -25,10 +27,12 @@ export const createResumeGroup = async (userId, groupData) => {
       experience: groupData.experience || [],
       education: groupData.education || [],
     },
+    themeConfig: groupData.themeConfig || DEFAULT_THEME_CONFIG,
     resumeCount: 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+
   
   return groupRef.id;
 };
@@ -67,6 +71,14 @@ export const updateGroupSharedData = async (groupId, sharedData) => {
   const groupRef = doc(db, 'resumeGroups', groupId);
   await updateDoc(groupRef, {
     sharedData,
+    updatedAt: serverTimestamp(),
+  });
+};
+
+export const updateGroupTheme = async (groupId, themeConfig) => {
+  const groupRef = doc(db, 'resumeGroups', groupId);
+  await updateDoc(groupRef, {
+    themeConfig,
     updatedAt: serverTimestamp(),
   });
 };
@@ -117,11 +129,23 @@ export const createResume = async (userId, groupId, resumeData) => {
       hackathons: 'detailed',
       header: 'centered',
     },
+    sectionFormats: resumeData.sectionFormats || {
+      summary: 'paragraph',
+      skills: 'grouped',
+      experience: 'detailed',
+      education: 'detailed',
+      projects: 'detailed',
+      certifications: 'inline',
+      internships: 'detailed',
+      hackathons: 'detailed',
+      header: 'centered',
+    },
     matchScore: null,
     matchAnalysis: null,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+
   
   // Update group resume count
   await updateDoc(doc(db, 'resumeGroups', groupId), {
@@ -314,5 +338,8 @@ export const buildFullResume = (group, resume) => {
     internships: custom.internships || [],
     hackathons: custom.hackathons || [],
     sectionFormats: { ...defaultFormats, ...(resume.sectionFormats || {}) },
+    themeConfig: group.themeConfig || DEFAULT_THEME_CONFIG,
+
+
   };
 };

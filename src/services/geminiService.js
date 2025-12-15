@@ -234,6 +234,32 @@ class AIService {
       return baseHighlights;
     }
   }
+
+  async editFieldWithAI(currentValue, userPrompt, fieldType = 'general') {
+    try {
+      const result = await this.callAI({
+        action: 'editField',
+        data: {
+          currentValue,
+          userPrompt,
+          fieldType,
+          model: this.model,
+        }
+      });
+      
+      if (!result.data?.success) {
+        throw new Error(result.data?.error || 'AI processing failed');
+      }
+      
+      return result.data.data;
+    } catch (error) {
+      console.error('Error editing field:', error);
+      if (error.code === 'functions/resource-exhausted') {
+        throw new Error('Insufficient credits. Please purchase more credits to continue.');
+      }
+      throw new Error(error.message || 'Failed to edit field');
+    }
+  }
 }
 
 // Singleton instance

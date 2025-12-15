@@ -3,19 +3,22 @@ import { BlobProvider } from '@react-pdf/renderer';
 import { Loader2, FileText, AlertCircle } from 'lucide-react';
 import UnifiedPDF from '../templates/UnifiedPDF';
 
-const LivePDFPreview = ({ resumeData, templateId, sectionOrder }) => {
+const LivePDFPreview = ({ resumeData, themeConfig, sectionOrder }) => {
+  // Create a stable key from themeConfig to force re-render when it changes
+  const themeKey = useMemo(() => JSON.stringify(themeConfig || {}), [themeConfig]);
+  
   // Memoize the PDF document to prevent unnecessary re-renders
   const pdfDocument = useMemo(() => {
     if (!resumeData?.personalInfo) return null;
     return (
       <UnifiedPDF 
         resumeData={resumeData} 
-        templateId={templateId} 
+        themeConfig={themeConfig}
         sectionOrder={sectionOrder}
         sectionFormats={resumeData.sectionFormats}
       />
     );
-  }, [resumeData, templateId, sectionOrder]);
+  }, [resumeData, themeKey, sectionOrder]);
 
   if (!resumeData?.personalInfo) {
     return (
@@ -30,7 +33,7 @@ const LivePDFPreview = ({ resumeData, templateId, sectionOrder }) => {
 
   return (
     <div className="h-full flex flex-col bg-neutral-700 rounded-lg overflow-hidden">
-      <BlobProvider document={pdfDocument}>
+      <BlobProvider key={themeKey} document={pdfDocument}>
         {({ blob, url, loading, error }) => {
           if (error) {
             return (

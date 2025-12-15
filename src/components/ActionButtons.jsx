@@ -5,7 +5,7 @@ import UnifiedPDF from '../templates/UnifiedPDF';
 import { exportToDOCX } from '../services/exportService';
 import { saveAs } from 'file-saver';
 
-const ActionButtons = ({ resumeRef, resumeData, templateId = 'classic', sectionOrder, onReset, hasChanges }) => {
+const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onReset, hasChanges }) => {
   const [isExportingDOCX, setIsExportingDOCX] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
 
@@ -33,7 +33,7 @@ const ActionButtons = ({ resumeRef, resumeData, templateId = 'classic', sectionO
       const pdfDocument = (
         <UnifiedPDF 
           resumeData={resumeData} 
-          templateId={templateId}
+          themeConfig={themeConfig}
           sectionOrder={sectionOrder}
           sectionFormats={resumeData.sectionFormats}
         />
@@ -49,7 +49,7 @@ const ActionButtons = ({ resumeRef, resumeData, templateId = 'classic', sectionO
     } finally {
       setIsExportingPDF(false);
     }
-  }, [resumeData, templateId, sectionOrder, getFileName]);
+  }, [resumeData, themeConfig, sectionOrder, getFileName]);
 
   const handleExportDOCX = async () => {
     if (!resumeData) {

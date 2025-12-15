@@ -13,7 +13,8 @@ import {
   X,
   Users,
   Database,
-  Sparkles
+  Sparkles,
+  Palette
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { 
@@ -34,6 +35,7 @@ const FileBrowser = ({
   onCreateResume,
   onEditShared,
   onAutoPopulate,
+  onEditDesign,
   refreshTrigger
 }) => {
   const { user } = useAuth();
@@ -389,6 +391,18 @@ const FileBrowser = ({
               <button
                 onClick={() => {
                   const group = groups.find(g => g.id === menuOpen.id);
+                  onEditDesign(group, null); // Pass group, no resumeId needed for triggering
+                  setMenuOpen(null);
+                }}
+                className="w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-50 flex items-center gap-2"
+              >
+                <Palette className="w-4 h-4" />
+                Design
+              </button>
+              <button
+                onClick={() => {
+
+                  const group = groups.find(g => g.id === menuOpen.id);
                   onAutoPopulate(group);
                   setMenuOpen(null);
                 }}
@@ -436,6 +450,8 @@ const FileBrowser = ({
                   <Edit2 className="w-4 h-4" />
                   Rename
                 </button>
+
+
                 {isLastResume ? (
                   <div className="px-3 py-2 text-xs text-neutral-400">
                     Can't delete last resume

@@ -96,6 +96,9 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
         const geminiClient = new GoogleGenAI({ apiKey: geminiApiKey.value() });
         result = await extractResumeFromFile(geminiClient, 'gemini-3-pro-preview', 'gemini', data.base64Data, data.mimeType);
         break;
+      case 'editField':
+        result = await editField(aiClient, model, provider, data.currentValue, data.userPrompt, data.fieldType);
+        break;
       default:
         throw new HttpsError('invalid-argument', `Unknown action: ${action}`);
     }
@@ -398,6 +401,72 @@ Return ONLY a JSON array of strings. No markdown.`;
   return JSON.parse(text);
 }
 
+async function editField(aiClient, model, provider, currentValue, userPrompt, fieldType) {
+  const fieldPrompts = {
+    summary: `You are an expert resume writer. Rewrite the following professional summary based on the user's request.
+    Current Summary: "{currentValue}"
+    User Request: "{userPrompt}"
+    
+    Rules:
+    - Maintain a professional, executive tone.
+    - Focus on achievements and impact.
+    - Keep it concise (3-4 sentences max unless asked otherwise).
+    - Return ONLY the new summary text.`,
+    
+    experience_position: `Rewrite this job title to be more standard or impressive, based on the user's request.
+    Current Title: "{currentValue}"
+    User Request: "{userPrompt}"
+    Return ONLY the new title text.`,
+    
+    experience_company: `Rewrite this company name/description based on the user's request.
+    Current Value: "{currentValue}"
+    User Request: "{userPrompt}"
+    Return ONLY the new text.`,
+    
+    experience_highlight: `Refine this resume bullet point based on the user's request.
+    Current Bullet: "{currentValue}"
+    User Request: "{userPrompt}"
+    
+    Rules:
+    - Use strong action verbs (e.g., Spearheaded, Engineered, Optimized).
+    - Quantify results where possible or asked.
+    - Keep it impactful and concise.
+    - Return ONLY the new bullet point text.`,
+    
+    skill: `Rewrite this skill or skill list based on the user's request.
+    Current Skill(s): "{currentValue}"
+    User Request: "{userPrompt}"
+    Return ONLY the new text.`,
+    
+    education: `Refine this education detail based on the user's request.
+    Current Value: "{currentValue}"
+    User Request: "{userPrompt}"
+    Return ONLY the new text.`,
+
+    project_description: `Refine this project description.
+    Current Description: "{currentValue}"
+    User Request: "{userPrompt}"
+    Rules: 
+    - Highlight technologies and outcomes.
+    - Return ONLY the new description text.`,
+    
+    general: `Rewrite the following text based on the user's request.
+    Current Text: "{currentValue}"
+    User Request: "{userPrompt}"
+    Return ONLY the new text.`
+  };
+
+  const specificPromptTemplate = fieldPrompts[fieldType] || fieldPrompts['general'];
+  const prompt = specificPromptTemplate
+    .replace('{currentValue}', currentValue || '')
+    .replace('{userPrompt}', userPrompt);
+
+  let text = await callAIText(aiClient, model, provider, prompt);
+  // Remove quotes if the model adds them wrapper-style, but be careful not to remove internal quotes 
+  // For simple text fields, usually just trimming is enough.
+  return text.trim();
+}
+
 async function extractResumeFromFile(aiClient, model, provider, base64Data, mimeType) {
   const mammoth = require('mammoth');
   
@@ -472,8 +541,49 @@ Return ONLY valid JSON.`;
     if (isDocx) {
       // Convert base64 to buffer for mammoth
       const buffer = Buffer.from(base64Data, 'base64');
-      const mammothResult = await mammoth.extractRawText({ buffer });
-      extractedText = mammothResult.value;
+      
+      // Use convertToHtml to preserve structure (bullets, headings, paragraphs)
+      // then convert to structured text format that preserves sections
+      const mammothResult = await mammoth.convertToHtml({ buffer });
+      const htmlContent = mammothResult.value;
+      
+      // Convert HTML to structured text that preserves formatting
+      // This helps the AI better identify resume sections
+      extractedText = htmlContent
+        // Preserve line breaks for major elements
+        .replace(/<\/h[1-6]>/gi, '\n\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<\/li>/gi, '\n')
+        .replace(/<\/tr>/gi, '\n')
+        .replace(/<br\s*\/?>/gi, '\n')
+        // Add bullet markers for list items
+        .replace(/<li[^>]*>/gi, '• ')
+        // Add section markers for headings
+        .replace(/<h1[^>]*>/gi, '\n=== ')
+        .replace(/<h2[^>]*>/gi, '\n== ')
+        .replace(/<h3[^>]*>/gi, '\n= ')
+        .replace(/<h[4-6][^>]*>/gi, '\n')
+        // Preserve bold text markers (often used for job titles, companies)
+        .replace(/<strong[^>]*>|<b[^>]*>/gi, '**')
+        .replace(/<\/strong>|<\/b>/gi, '**')
+        // Remove all remaining HTML tags
+        .replace(/<[^>]+>/g, '')
+        // Decode HTML entities
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&mdash;/g, '—')
+        .replace(/&ndash;/g, '–')
+        .replace(/&bull;/g, '•')
+        // Clean up excessive whitespace while preserving structure
+        .replace(/\n\s*\n\s*\n/g, '\n\n')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+      
+      console.log(`DOCX HTML extraction found ${mammothResult.messages?.length || 0} warnings`);
     } else if (isPdf) {
       // For OpenAI with PDF, we need to use a different approach
       // Since there's no pdftotext built-in, we'll try Gemini-style direct for now
