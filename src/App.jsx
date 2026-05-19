@@ -79,7 +79,6 @@ function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState('');
   const [apiKeySet, setApiKeySet] = useState(true);
-  const [currentModel, setCurrentModel] = useState('gemini-2.5-pro');
   const [matchAnalysis, setMatchAnalysis] = useState(null);
   const [dataLoading, setDataLoading] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -178,11 +177,6 @@ function App() {
         setSelectedResumeId(user.preferences.currentResumeId);
       }
     }
-    // Load saved model preference
-    if (user?.preferences?.selectedModel) {
-      setCurrentModel(user.preferences.selectedModel);
-      geminiService.setModel(user.preferences.selectedModel);
-    }
   }, [user?.preferences]);
 
   const handleSelectResume = async (groupId, resumeId) => {
@@ -249,13 +243,6 @@ function App() {
       setError('Failed to initialize API.');
       setApiKeySet(false);
     }
-  };
-
-  const handleModelChange = async (modelId) => {
-    setCurrentModel(modelId);
-    geminiService.setModel(modelId);
-    // Save model preference to Firebase
-    await updatePreferences({ selectedModel: modelId });
   };
 
   const handleCheckMatch = async (jd) => {
@@ -685,9 +672,7 @@ function App() {
         <div className="bg-white border-b border-neutral-200 px-4 py-3">
           <ApiKeyInput 
             onApiKeySet={handleApiKeySet} 
-            onModelChange={handleModelChange}
-            isSet={apiKeySet} 
-            currentModel={currentModel}
+            isSet={apiKeySet}
           />
         </div>
       )}

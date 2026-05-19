@@ -1,6 +1,6 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onRequest } = require('firebase-functions/v2/https');
-const { defineSecret } = require('firebase-functions/params');
+const { defineSecret, defineString } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 const Stripe = require('stripe');
 const { GoogleGenAI } = require('@google/genai');
@@ -15,19 +15,13 @@ const stripeSecretKey = defineSecret('STRIPE_SECRET_KEY');
 const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
 const openaiApiKey = defineSecret('OPENAI_API_KEY');
-
-// Helper to determine provider from model ID
-function getProvider(modelId) {
-  if (modelId.startsWith('gpt-') || modelId.startsWith('o1') || modelId.startsWith('o3')) {
-    return 'openai';
-  }
-  return 'gemini';
-}
+const llmProvider = defineString('LLM_PROVIDER', { default: 'gemini' });
+const modelName = defineString('MODEL_NAME', { default: 'gemini-2.5-pro' });
 
 // Stripe config
 const CREDITS_PER_PURCHASE = 50;
-const PRICE_AMOUNT = 200; // $2.00 in cents
-const STRIPE_PRODUCT_ID = 'prod_Tb7WA0HOBjOx8h';
+const PRICE_AMOUNT = 500; // $5.00 in cents
+const STRIPE_PRODUCT_ID = 'prod_UXfqMUL4G8rS8I';
 
 // ============================================================================
 // AI Cloud Functions
@@ -61,15 +55,15 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
     throw new HttpsError('resource-exhausted', 'Insufficient credits. Please purchase more credits to continue.');
   }
 
-  const model = data.model || 'gemini-2.5-pro';
-  const provider = getProvider(model);
-  
+  const model = modelName.value();
+  const provider = llmProvider.value();
+
   // Initialize the appropriate AI client
   let aiClient;
   if (provider === 'openai') {
-    aiClient = new OpenAI({ apiKey: openaiApiKey.value() });
+    aiClient = new OpenAI({ apiKey: openaiApiKey.value().trim() });
   } else {
-    aiClient = new GoogleGenAI({ apiKey: geminiApiKey.value() });
+    aiClient = new GoogleGenAI({ apiKey: geminiApiKey.value().trim() });
   }
 
   try {
@@ -92,9 +86,7 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
         result = await transformResumeForRole(aiClient, model, provider, data.resume, data.targetRole, data.fieldsToUpdate);
         break;
       case 'extractResumeFromFile':
-        // Always use Gemini 3 Pro for file extraction (best multimodal accuracy)
-        const geminiClient = new GoogleGenAI({ apiKey: geminiApiKey.value() });
-        result = await extractResumeFromFile(geminiClient, 'gemini-3-pro-preview', 'gemini', data.base64Data, data.mimeType);
+        result = await extractResumeFromFile(aiClient, model, provider, data.base64Data, data.mimeType);
         break;
       case 'editField':
         result = await editField(aiClient, model, provider, data.currentValue, data.userPrompt, data.fieldType);
@@ -393,10 +385,7 @@ ${JSON.stringify(baseHighlights, null, 2)}
 
 Return ONLY a JSON array of strings. No markdown.`;
 
-  // Use a fast model for this helper task
-  const fastModel = provider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash';
-  
-  let text = await callAIText(aiClient, fastModel, provider, prompt);
+  let text = await callAIText(aiClient, modelName.value(), provider, prompt);
   text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   return JSON.parse(text);
 }
@@ -646,7 +635,7 @@ exports.createCheckoutSession = onCall({ secrets: [stripeSecretKey] }, async (re
     throw new HttpsError('failed-precondition', 'You can only purchase credits when you have less than 5 remaining.');
   }
 
-  const stripe = new Stripe(stripeSecretKey.value());
+  const stripe = new Stripe(stripeSecretKey.value().trim());
 
   try {
     const session = await stripe.checkout.sessions.create({
@@ -697,12 +686,12 @@ exports.stripeWebhook = onRequest({ secrets: [stripeSecretKey, stripeWebhookSecr
     return;
   }
 
-  const stripe = new Stripe(stripeSecretKey.value());
+  const stripe = new Stripe(stripeSecretKey.value().trim());
   const sig = req.headers['stripe-signature'];
 
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.rawBody, sig, stripeWebhookSecret.value());
+    event = stripe.webhooks.constructEvent(req.rawBody, sig, stripeWebhookSecret.value().trim());
   } catch (err) {
     console.error('Webhook signature verification failed:', err.message);
     res.status(400).send(`Webhook Error: ${err.message}`);

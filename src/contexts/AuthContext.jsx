@@ -45,7 +45,6 @@ export const AuthProvider = ({ children }) => {
             preferences: {
               currentGroupId: null,
               currentResumeId: null,
-              selectedModel: 'gemini-2.5-pro', // Default AI model
             }
           });
         } else {

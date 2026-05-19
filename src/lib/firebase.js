@@ -38,10 +38,10 @@ if (typeof window !== 'undefined') {
   analytics = getAnalytics(app);
 }
 
-// Connect to emulator in development (uncomment when testing locally)
-// if (window.location.hostname === 'localhost') {
-//   connectFunctionsEmulator(functions, 'localhost', 5001);
-// }
+// Connect to Functions emulator in development
+if (import.meta.env.DEV) {
+  connectFunctionsEmulator(functions, '127.0.0.1', 5001);
+}
 
 // Helper to call Cloud Functions
 export { httpsCallable };
