@@ -1,27 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { X, Check, Loader2, ArrowLeft, RotateCcw } from 'lucide-react';
+import { X, Check, Loader2, ArrowLeft, RotateCcw, Layout, FileText } from 'lucide-react';
 import { PDFViewer } from '@react-pdf/renderer';
 import ThemeEditor from './ThemeEditor';
 import UnifiedPDF from '../templates/UnifiedPDF';
-import { updateGroupTheme, getResumeGroup } from '../services/resumeService';
+import LayoutPreservingPDF from '../templates/LayoutPreservingPDF';
+import LayoutConfirmationModal from './LayoutConfirmationModal';
+import { updateGroupTheme, getResumeGroup, setLayoutSource as svcSetLayoutSource, saveLayoutConfig } from '../services/resumeService';
 import { analyticsService } from '../services/analyticsService';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 
 const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate }) => {
   const [themeConfig, setThemeConfig] = useState(DEFAULT_THEME_CONFIG);
+  const [layoutSource, setLayoutSourceState] = useState('template');
+  const [layoutConfig, setLayoutConfigState] = useState(null);
+  const [showLayoutEditor, setShowLayoutEditor] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // Initialize theme from group data or passed group
+  // Initialize theme + layout from group data
   useEffect(() => {
     if (isOpen && group) {
-      // If group is passed, use its theme if available
-      if (group.themeConfig) {
-        setThemeConfig(group.themeConfig);
-      } else {
-        // Fallback or fetch if needed (but ideally group object is complete)
-        setThemeConfig(DEFAULT_THEME_CONFIG);
-      }
+      setThemeConfig(group.themeConfig || DEFAULT_THEME_CONFIG);
+      setLayoutSourceState(group.layoutSource || 'template');
+      setLayoutConfigState(group.layoutConfig || null);
     }
   }, [isOpen, group]);
 
@@ -31,6 +32,10 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
     setIsSaving(true);
     try {
       await updateGroupTheme(group.id, themeConfig);
+      await svcSetLayoutSource(group.id, layoutSource);
+      if (layoutSource === 'uploaded' && layoutConfig) {
+        await saveLayoutConfig(group.id, layoutConfig, 'uploaded');
+      }
       
       // Track theme customization
       analyticsService.trackThemeChange(themeConfig.preset || 'custom');
@@ -96,7 +101,34 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-hidden p-4 flex gap-4">
+        <div className="flex-1 overflow-hidden p-4 flex flex-col gap-3">
+          {/* Layout mode toggle */}
+          <div className="flex items-center gap-2 p-2 bg-neutral-50 rounded-lg border border-neutral-200">
+            <span className="text-xs font-medium text-neutral-600 mr-2">Layout mode:</span>
+            <button
+              onClick={() => setLayoutSourceState('template')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium ${layoutSource === 'template' ? 'bg-neutral-900 text-white' : 'bg-white border border-neutral-200 text-neutral-700 hover:bg-neutral-100'}`}
+            >
+              <FileText className="w-3.5 h-3.5" /> Template
+            </button>
+            <button
+              onClick={() => {
+                setLayoutSourceState('uploaded');
+                if (!layoutConfig) setShowLayoutEditor(true);
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium ${layoutSource === 'uploaded' ? 'bg-neutral-900 text-white' : 'bg-white border border-neutral-200 text-neutral-700 hover:bg-neutral-100'}`}
+            >
+              <Layout className="w-3.5 h-3.5" /> Original layout
+            </button>
+            {layoutSource === 'uploaded' && (
+              <button
+                onClick={() => setShowLayoutEditor(true)}
+                className="ml-auto text-xs text-blue-600 hover:text-blue-800"
+              >Edit layout settings…</button>
+            )}
+          </div>
+
+          <div className="flex-1 min-h-0 flex gap-4">
           {/* Editor Pane */}
           <div className="w-1/3 min-w-[320px] flex flex-col overflow-y-auto">
             <ThemeEditor config={themeConfig} onChange={setThemeConfig} />
@@ -106,10 +138,20 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
           <div className="flex-1 bg-neutral-100 rounded-lg overflow-hidden border border-neutral-200">
             {resumeData ? (
               <PDFViewer width="100%" height="100%" className="border-0">
-                <UnifiedPDF 
-                  resumeData={resumeData}
-                  themeConfig={themeConfig} 
-                />
+                {layoutSource === 'uploaded' && layoutConfig ? (
+                  <LayoutPreservingPDF
+                    resumeData={resumeData}
+                    layoutConfig={layoutConfig}
+                    sectionOrder={group?.sectionOrder}
+                    visibleSections={group?.visibleSections}
+                    customSectionDefs={group?.customSectionDefs}
+                  />
+                ) : (
+                  <UnifiedPDF 
+                    resumeData={resumeData}
+                    themeConfig={themeConfig} 
+                  />
+                )}
               </PDFViewer>
             ) : (
               <div className="flex items-center justify-center h-full text-neutral-400">
@@ -117,8 +159,23 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
               </div>
             )}
           </div>
+          </div>
         </div>
       </div>
+
+      <LayoutConfirmationModal
+        isOpen={showLayoutEditor}
+        onClose={() => setShowLayoutEditor(false)}
+        detectedLayout={layoutConfig}
+        resumeContent={resumeData}
+        customSectionDefs={group?.customSectionDefs || []}
+        sectionOrder={group?.sectionOrder}
+        onConfirm={(finalCfg) => {
+          setLayoutConfigState(finalCfg);
+          setLayoutSourceState('uploaded');
+          setShowLayoutEditor(false);
+        }}
+      />
     </div>
   );
 };

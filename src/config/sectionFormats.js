@@ -3,12 +3,11 @@
 
 export const SECTION_FORMATS = {
   summary: {
-    label: 'Summary',
+    label: 'Professional Summary',
     formats: {
-      paragraph: { id: 'paragraph', label: 'Paragraph', icon: 'AlignLeft', description: 'Single flowing paragraph' },
       points: { id: 'points', label: 'Bullet Points', icon: 'List', description: 'List of key points' },
     },
-    default: 'paragraph',
+    default: 'points',
   },
   
   skills: {

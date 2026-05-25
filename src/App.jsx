@@ -12,6 +12,7 @@ import JobDescriptionModal from './components/JobDescriptionModal';
 import VersionHistory from './components/VersionHistory';
 import ResumeEditor from './components/ResumeEditor';
 import LivePDFPreview from './components/LivePDFPreview';
+import LayoutPreservingTemplate from './templates/LayoutPreservingTemplate';
 import SectionReorder from './components/SectionReorder';
 import MatchAnalysis from './components/MatchAnalysis';
 import ActionButtons from './components/ActionButtons';
@@ -29,8 +30,8 @@ import {
   updateResumeCustomData, 
   updateResumeMatchAnalysis,
   createResume,
+  createGeneratedResume,
   buildFullResume,
-  createVersionSnapshot,
   updateGroupSharedData,
   updateResumeSectionFormat,
   getResumesInGroup,
@@ -99,6 +100,8 @@ function App() {
     resumeData,
     setResumeData,
     updateField,
+    addItem,
+    removeItem,
     reset: resetEditor,
   } = useResumeEditor(INITIAL_RESUME_DATA);
 
@@ -301,35 +304,6 @@ function App() {
     setError('');
     
     try {
-      // Save snapshot before AI update using current resumeData
-      console.log('[AI Update] Creating version snapshot...');
-      const snapshotData = {
-        personalInfo: resumeData.personalInfo,
-        summary: resumeData.summary,
-        experience: resumeData.experience?.map(exp => ({
-          highlights: exp.highlights,
-          environment: exp.environment
-        })),
-        skills: resumeData.skills,
-        projects: resumeData.projects,
-        certifications: resumeData.certifications,
-        internships: resumeData.internships,
-        hackathons: resumeData.hackathons,
-      };
-      console.log('[AI Update] Snapshot data:', JSON.stringify(snapshotData, null, 2));
-      
-      await createVersionSnapshot(currentResume.id, snapshotData, {
-        jobDescription: inputText,
-        fieldsUpdated: fieldsToUpdate,
-        label: mode === 'transform' 
-          ? `Before transform: ${inputText.substring(0, 50)}...` 
-          : `Before: ${fieldsToUpdate.join(', ')} update`,
-      });
-      console.log('[AI Update] Version snapshot created successfully');
-      
-      // Track version snapshot creation
-      analyticsService.trackVersionSnapshotCreate(currentResume.id, mode === 'transform' ? 'transform' : 'optimize');
-
       console.log(`[AI Update] ${mode === 'transform' ? 'Transform' : 'Optimize'} mode, calling AI service...`);
       console.log('[AI Update] Current resume data being sent:', JSON.stringify(resumeData, null, 2));
       
@@ -344,33 +318,35 @@ function App() {
       if (!updatedResume) {
         throw new Error('AI returned empty response');
       }
-      
-      setResumeData(updatedResume);
+
       setJobDescription(inputText);
       
       // Track AI optimization success (without match score for now)
       analyticsService.trackAIOptimizeSuccess(previousScore, 0, mode);
       analyticsService.trackCreditsUsed(mode === 'transform' ? 'ai_transform' : 'ai_optimize', 1);
-      
-      // Save to Firebase - include all optimizable fields
-      console.log('[AI Update] Saving to Firebase...');
-      const dataToSave = {
-        personalInfo: updatedResume.personalInfo,
-        summary: updatedResume.summary,
-        experience: updatedResume.experience?.map(exp => ({
-          highlights: exp.highlights,
-          environment: exp.environment
-        })),
-        skills: updatedResume.skills,
-        projects: updatedResume.projects,
-        certifications: updatedResume.certifications,
-        internships: updatedResume.internships,
-        hackathons: updatedResume.hackathons,
-      };
-      console.log('[AI Update] Data to save:', JSON.stringify(dataToSave, null, 2));
-      
-      await updateResumeCustomData(currentResume.id, dataToSave);
-      console.log('[AI Update] Custom data saved. Complete!');
+
+      // AI outputs are now forked into a new child resume so the source resume
+      // remains unchanged and generated variants can be browsed separately.
+      console.log('[AI Update] Creating generated child resume...');
+      const newResumeId = await createGeneratedResume(user.uid, currentResume, updatedResume, {
+        mode,
+        jobDescription: inputText,
+        fieldsToUpdate,
+        label: mode === 'transform'
+          ? `Transformed for ${inputText.substring(0, 50)}...`
+          : `Optimized for ${fieldsToUpdate.join(', ')}`,
+      });
+
+      setRefreshTrigger(prev => prev + 1);
+      setHasUnsavedChanges(false);
+      setSelectedGroupId(currentResume.groupId);
+      setSelectedResumeId(newResumeId);
+      setResumeData(updatedResume);
+      await updatePreferences({
+        currentGroupId: currentResume.groupId,
+        currentResumeId: newResumeId,
+      });
+      console.log('[AI Update] Generated child resume created:', newResumeId);
     } catch (err) {
       console.error('[AI Update] ERROR:', err);
       console.error('[AI Update] Error details:', {
@@ -811,6 +787,10 @@ function App() {
                       themeConfig={currentGroup?.themeConfig}
                       sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
                       hasChanges={hasUnsavedChanges}
+                      layoutSource={currentGroup?.layoutSource}
+                      layoutConfig={currentGroup?.layoutConfig}
+                      visibleSections={visibleSections}
+                      customSectionDefs={currentGroup?.customSectionDefs}
                     />
                   </div>
                 </div>
@@ -899,15 +879,37 @@ function App() {
                       right={
                         <div className="flex-1 flex flex-col bg-neutral-800 p-4">
                           <div className="text-xs text-neutral-400 mb-2 flex items-center justify-between">
-                            <span>PDF Preview</span>
-                            <span className="text-neutral-500">{TEMPLATES[selectedTemplate]?.name}</span>
+                            <span>{currentGroup?.layoutSource === 'uploaded' ? 'Live Inline Editor' : 'PDF Preview'}</span>
+                            <span className="text-neutral-500">{currentGroup?.layoutSource === 'uploaded' ? 'Original layout' : TEMPLATES[selectedTemplate]?.name}</span>
                           </div>
-                          <div className="flex-1 rounded-lg overflow-hidden">
-                            <LivePDFPreview
-                              resumeData={resumeData}
-                              themeConfig={currentGroup?.themeConfig}
-                              sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
-                            />
+                          <div className="flex-1 rounded-lg overflow-auto bg-neutral-200 flex items-start justify-center p-4">
+                            {currentGroup?.layoutSource === 'uploaded' ? (
+                              <div className="shadow-2xl bg-white">
+                                <LayoutPreservingTemplate
+                                  resumeData={resumeData}
+                                  layoutConfig={currentGroup?.layoutConfig}
+                                  sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+                                  visibleSections={visibleSections}
+                                  customSectionDefs={currentGroup?.customSectionDefs}
+                                  isEditMode={true}
+                                  onUpdate={(path, val) => { handleFieldUpdate(path, val); }}
+                                  onListAdd={(path) => { addItem(path, ''); setHasUnsavedChanges(true); }}
+                                  onListRemove={(path, index) => { removeItem(path, index); setHasUnsavedChanges(true); }}
+                                />
+                              </div>
+                            ) : (
+                              <div className="w-full h-full">
+                                <LivePDFPreview
+                                  resumeData={resumeData}
+                                  themeConfig={currentGroup?.themeConfig}
+                                  sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+                                  layoutSource={currentGroup?.layoutSource}
+                                  layoutConfig={currentGroup?.layoutConfig}
+                                  visibleSections={visibleSections}
+                                  customSectionDefs={currentGroup?.customSectionDefs}
+                                />
+                              </div>
+                            )}
                           </div>
                         </div>
                       }
@@ -1041,6 +1043,10 @@ function App() {
               resumeData={resumeData}
               themeConfig={currentGroup?.themeConfig}
               sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+              layoutSource={currentGroup?.layoutSource}
+              layoutConfig={currentGroup?.layoutConfig}
+              visibleSections={visibleSections}
+              customSectionDefs={currentGroup?.customSectionDefs}
             />
           </div>
         </div>

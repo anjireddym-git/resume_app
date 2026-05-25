@@ -3,7 +3,7 @@ import { X, Loader2, Sparkles, CheckSquare, Square, Zap, FileText } from 'lucide
 
 const FIELD_OPTIONS = [
   { id: 'headline', label: 'Professional Headline', description: 'Title shown below your name', default: true },
-  { id: 'summary', label: 'Summary', description: 'Professional summary statement', default: true },
+  { id: 'summary', label: 'Professional Summary', description: 'Professional summary bullet points', default: true },
   { id: 'jobTitles', label: 'Job Titles', description: 'Position/role names in experience', default: true },
   { id: 'experience', label: 'Experience Highlights', description: 'Job responsibilities and achievements', default: true },
   { id: 'skills', label: 'Skills', description: 'Technical and soft skills', default: true },

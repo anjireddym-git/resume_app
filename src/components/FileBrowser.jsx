@@ -14,7 +14,8 @@ import {
   Users,
   Database,
   Sparkles,
-  Palette
+  Palette,
+  Star
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { 
@@ -22,10 +23,84 @@ import {
   getResumesInGroup, 
   deleteResumeGroup, 
   deleteResume,
+  toggleResumeStar,
   updateResumeGroup,
   updateResume
 } from '../services/resumeService';
 import ConfirmDialog from './ConfirmDialog';
+
+const ROOT_PARENT_ID = '__root__';
+
+function toMillis(value) {
+  const date = value?.toDate?.() || (value ? new Date(value) : null);
+  return Number.isFinite(date?.getTime?.()) ? date.getTime() : 0;
+}
+
+function sortResumes(resumes) {
+  return [...resumes].sort((a, b) => {
+    const timeDiff = toMillis(b.updatedAt) - toMillis(a.updatedAt);
+    if (timeDiff !== 0) return timeDiff;
+    return (b.version || 0) - (a.version || 0);
+  });
+}
+
+function buildResumeTree(resumes) {
+  const childrenByParent = new Map();
+
+  for (const resume of resumes) {
+    const key = resume.parentResumeId || ROOT_PARENT_ID;
+    if (!childrenByParent.has(key)) childrenByParent.set(key, []);
+    childrenByParent.get(key).push(resume);
+  }
+
+  const buildNodes = (parentId = ROOT_PARENT_ID) => {
+    const children = sortResumes(childrenByParent.get(parentId) || []);
+    return children.map((resume) => ({
+      resume,
+      children: buildNodes(resume.id),
+    }));
+  };
+
+  return buildNodes();
+}
+
+function resumeMatchesSearch(resume, searchQuery) {
+  if (!searchQuery) return true;
+  const value = searchQuery.toLowerCase();
+  return [
+    resume.name,
+    resume.generationType,
+    resume.generationMeta?.sourceResumeName,
+    resume.generationMeta?.label,
+  ]
+    .filter(Boolean)
+    .some((text) => String(text).toLowerCase().includes(value));
+}
+
+function filterResumeTree(nodes, searchQuery) {
+  if (!searchQuery) return nodes;
+
+  return nodes.flatMap((node) => {
+    const children = filterResumeTree(node.children, searchQuery);
+    if (resumeMatchesSearch(node.resume, searchQuery) || children.length > 0) {
+      return [{ ...node, children }];
+    }
+    return [];
+  });
+}
+
+function collectAncestorIds(resumeId, resumes) {
+  const byId = new Map(resumes.map((resume) => [resume.id, resume]));
+  const ancestorIds = [];
+  let current = byId.get(resumeId);
+
+  while (current?.parentResumeId) {
+    ancestorIds.push(current.parentResumeId);
+    current = byId.get(current.parentResumeId);
+  }
+
+  return ancestorIds;
+}
 
 const FileBrowser = ({ 
   onSelectResume, 
@@ -48,6 +123,7 @@ const FileBrowser = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [editingName, setEditingName] = useState('');
+  const [expandedResumes, setExpandedResumes] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null); // { type: 'group'|'resume', id, groupId?, name }
   const containerRef = useRef(null);
 
@@ -101,10 +177,36 @@ const FileBrowser = ({
     }
   }, [expandedGroups, refreshTrigger, loadResumesForGroup]);
 
+  useEffect(() => {
+    if (!selectedGroupId || !selectedResumeId) return;
+    const resumes = groupResumes[selectedGroupId] || [];
+    if (!resumes.some((resume) => resume.id === selectedResumeId)) return;
+
+    const ancestorIds = collectAncestorIds(selectedResumeId, resumes);
+    if (ancestorIds.length === 0) return;
+
+    setExpandedGroups((prev) => ({
+      ...prev,
+      [selectedGroupId]: true,
+    }));
+    setExpandedResumes((prev) => {
+      const next = { ...prev };
+      for (const id of ancestorIds) next[id] = true;
+      return next;
+    });
+  }, [selectedGroupId, selectedResumeId, groupResumes]);
+
   const toggleGroup = (groupId) => {
     setExpandedGroups(prev => ({
       ...prev,
       [groupId]: !prev[groupId]
+    }));
+  };
+
+  const toggleResumeBranch = (resumeId) => {
+    setExpandedResumes((prev) => ({
+      ...prev,
+      [resumeId]: !prev[resumeId],
     }));
   };
 
@@ -147,6 +249,28 @@ const FileBrowser = ({
     setConfirmDelete(null);
   };
 
+  const handleToggleStar = async (resume, groupId) => {
+    const nextStarred = !resume.starred;
+    try {
+      await toggleResumeStar(resume.id, nextStarred);
+      setGroupResumes((prev) => ({
+        ...prev,
+        [groupId]: (prev[groupId] || []).map((item) =>
+          item.id === resume.id
+            ? {
+                ...item,
+                starred: nextStarred,
+                starredAt: nextStarred ? new Date().toISOString() : null,
+              }
+            : item
+        ),
+      }));
+    } catch (error) {
+      console.error('Failed to toggle star:', error);
+    }
+    setMenuOpen(null);
+  };
+
   const startRename = (id, name) => {
     setEditingId(id);
     setEditingName(name);
@@ -181,9 +305,135 @@ const FileBrowser = ({
   const filteredGroups = groups.filter(group => {
     const groupMatches = group.name.toLowerCase().includes(searchQuery.toLowerCase());
     const resumes = groupResumes[group.id] || [];
-    const resumeMatches = resumes.some(r => r.name.toLowerCase().includes(searchQuery.toLowerCase()));
+    const resumeMatches = resumes.some((resume) => resumeMatchesSearch(resume, searchQuery));
     return groupMatches || resumeMatches;
   });
+
+  const renderResumeShortcut = (resume, groupId) => {
+    const isGenerated = !!resume.parentResumeId;
+    return (
+      <button
+        key={`starred-${resume.id}`}
+        onClick={() => onSelectResume(groupId, resume.id)}
+        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-neutral-100 transition-colors ${
+          selectedResumeId === resume.id ? 'bg-blue-50 text-blue-700' : ''
+        }`}
+      >
+        <Star className="w-4 h-4 text-amber-400 fill-amber-400 flex-shrink-0" />
+        {isGenerated ? (
+          <Sparkles className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+        ) : (
+          <FileText className="w-3.5 h-3.5 text-neutral-400 flex-shrink-0" />
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="text-sm truncate">{resume.name}</div>
+          {isGenerated && resume.generationMeta?.sourceResumeName && (
+            <div className="text-[10px] text-neutral-400 truncate">
+              From {resume.generationMeta.sourceResumeName}
+            </div>
+          )}
+        </div>
+      </button>
+    );
+  };
+
+  const renderResumeNode = (node, groupId, depth = 0) => {
+    const { resume, children } = node;
+    const hasChildren = children.length > 0;
+    const isGenerated = !!resume.parentResumeId;
+    const isSelected = selectedResumeId === resume.id;
+
+    return (
+      <div key={resume.id}>
+        <div
+          className={`group flex items-center gap-2 py-1.5 cursor-pointer hover:bg-neutral-100 transition-colors ${
+            isSelected ? 'bg-blue-50 text-blue-700' : ''
+          }`}
+          onClick={() => onSelectResume(groupId, resume.id)}
+          style={{ paddingLeft: `${12 + depth * 18}px`, paddingRight: '12px' }}
+        >
+          {hasChildren ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleResumeBranch(resume.id);
+              }}
+              className="p-0.5 rounded hover:bg-neutral-200/70"
+              title={expandedResumes[resume.id] ? 'Collapse generated resumes' : 'Expand generated resumes'}
+            >
+              {expandedResumes[resume.id] ? (
+                <ChevronDown className="w-4 h-4 text-neutral-400 flex-shrink-0" />
+              ) : (
+                <ChevronRight className="w-4 h-4 text-neutral-400 flex-shrink-0" />
+              )}
+            </button>
+          ) : (
+            <span className="w-5 flex-shrink-0" />
+          )}
+
+          {isGenerated ? (
+            <Sparkles className="w-4 h-4 text-amber-500 flex-shrink-0" />
+          ) : (
+            <FileText className="w-4 h-4 text-neutral-400 flex-shrink-0" />
+          )}
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              {editingId === resume.id ? (
+                <input
+                  type="text"
+                  value={editingName}
+                  onChange={(e) => setEditingName(e.target.value)}
+                  onBlur={() => saveRename('resume', resume.id, groupId)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveRename('resume', resume.id, groupId);
+                    if (e.key === 'Escape') setEditingId(null);
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  className="flex-1 text-sm px-1 border border-neutral-300 rounded focus:outline-none min-w-0"
+                  autoFocus
+                />
+              ) : (
+                <span className="text-sm truncate">{resume.name}</span>
+              )}
+              {resume.starred && (
+                <Star className="w-3 h-3 text-amber-400 fill-amber-400 flex-shrink-0" />
+              )}
+              {isGenerated && (
+                <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 flex-shrink-0">
+                  {resume.generationType === 'transform' ? 'Transform' : 'Generated'}
+                </span>
+              )}
+            </div>
+            {isGenerated && resume.generationMeta?.sourceResumeName && (
+              <div className="text-[10px] text-neutral-400 truncate">
+                From {resume.generationMeta.sourceResumeName}
+              </div>
+            )}
+          </div>
+
+          {resume.matchScore && (
+            <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
+              resume.matchScore >= 80 ? 'bg-emerald-100 text-emerald-700' :
+              resume.matchScore >= 60 ? 'bg-amber-100 text-amber-700' :
+              'bg-neutral-100 text-neutral-600'
+            }`}>
+              {resume.matchScore}%
+            </span>
+          )}
+
+          <button
+            onClick={(e) => openMenu(e, resume.id, 'resume', groupId)}
+            className="menu-trigger p-1 text-neutral-400 hover:text-neutral-600 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+          >
+            <MoreHorizontal className="w-3 h-3" />
+          </button>
+        </div>
+
+        {hasChildren && expandedResumes[resume.id] && children.map((child) => renderResumeNode(child, groupId, depth + 1))}
+      </div>
+    );
+  };
 
   if (loading) {
     return (
@@ -249,6 +499,10 @@ const FileBrowser = ({
             const filteredResumes = searchQuery 
               ? resumes.filter(r => r.name.toLowerCase().includes(searchQuery.toLowerCase()))
               : resumes;
+            const starredResumes = sortResumes(
+              resumes.filter((resume) => resume.starred && resumeMatchesSearch(resume, searchQuery))
+            );
+            const resumeTree = filterResumeTree(buildResumeTree(resumes), searchQuery);
 
             return (
               <div key={group.id}>
@@ -297,52 +551,23 @@ const FileBrowser = ({
                 {/* Resumes */}
                 {expandedGroups[group.id] && (
                   <div className="ml-4">
-                    {filteredResumes.map(resume => (
-                      <div
-                        key={resume.id}
-                        className={`group flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-neutral-100 transition-colors ${
-                          selectedResumeId === resume.id ? 'bg-blue-50 text-blue-700' : ''
-                        }`}
-                        onClick={() => onSelectResume(group.id, resume.id)}
-                      >
-                        <FileText className="w-4 h-4 text-neutral-400 flex-shrink-0" />
-                        
-                        {editingId === resume.id ? (
-                          <input
-                            type="text"
-                            value={editingName}
-                            onChange={(e) => setEditingName(e.target.value)}
-                            onBlur={() => saveRename('resume', resume.id, group.id)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') saveRename('resume', resume.id, group.id);
-                              if (e.key === 'Escape') setEditingId(null);
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            className="flex-1 text-sm px-1 border border-neutral-300 rounded focus:outline-none min-w-0"
-                            autoFocus
-                          />
-                        ) : (
-                          <span className="flex-1 text-sm truncate">{resume.name}</span>
-                        )}
-                        
-                        {resume.matchScore && (
-                          <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
-                            resume.matchScore >= 80 ? 'bg-emerald-100 text-emerald-700' :
-                            resume.matchScore >= 60 ? 'bg-amber-100 text-amber-700' :
-                            'bg-neutral-100 text-neutral-600'
-                          }`}>
-                            {resume.matchScore}%
-                          </span>
-                        )}
-
-                        <button
-                          onClick={(e) => openMenu(e, resume.id, 'resume', group.id)}
-                          className="menu-trigger p-1 text-neutral-400 hover:text-neutral-600 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <MoreHorizontal className="w-3 h-3" />
-                        </button>
+                    {starredResumes.length > 0 && (
+                      <div className="pb-2 border-b border-neutral-100 mb-2">
+                        <div className="px-3 py-1 text-[10px] font-medium text-neutral-400 uppercase tracking-wide flex items-center gap-1.5">
+                          <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+                          Starred
+                        </div>
+                        {starredResumes.map((resume) => renderResumeShortcut(resume, group.id))}
                       </div>
-                    ))}
+                    )}
+
+                    {resumeTree.length > 0 ? (
+                      resumeTree.map((node) => renderResumeNode(node, group.id))
+                    ) : searchQuery ? (
+                      <div className="px-3 py-2 text-xs text-neutral-400">No matching resumes</div>
+                    ) : filteredResumes.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-neutral-400">No resumes yet</div>
+                    ) : null}
                     
                     <button
                       onClick={() => onCreateResume(group.id)}
@@ -438,9 +663,17 @@ const FileBrowser = ({
             const resumes = groupResumes[menuOpen.groupId] || [];
             const isLastResume = resumes.length <= 1;
             const resume = resumes.find(r => r.id === menuOpen.id);
+            const hasChildren = resumes.some((item) => item.parentResumeId === menuOpen.id);
             
             return (
               <>
+                <button
+                  onClick={() => handleToggleStar(resume, menuOpen.groupId)}
+                  className="w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-50 flex items-center gap-2"
+                >
+                  <Star className={`w-4 h-4 ${resume?.starred ? 'text-amber-400 fill-amber-400' : ''}`} />
+                  {resume?.starred ? 'Unstar' : 'Star'}
+                </button>
                 <button
                   onClick={() => {
                     startRename(menuOpen.id, resume?.name || '');
@@ -452,7 +685,11 @@ const FileBrowser = ({
                 </button>
 
 
-                {isLastResume ? (
+                {hasChildren ? (
+                  <div className="px-3 py-2 text-xs text-neutral-400">
+                    Delete generated children first
+                  </div>
+                ) : isLastResume ? (
                   <div className="px-3 py-2 text-xs text-neutral-400">
                     Can't delete last resume
                   </div>

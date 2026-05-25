@@ -4,6 +4,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getFunctions, httpsCallable, connectFunctionsEmulator } from 'firebase/functions';
+import { getStorage, ref as storageRef, uploadBytes, getBlob, deleteObject } from 'firebase/storage';
 import { getAnalytics, logEvent, setUserId, setUserProperties } from 'firebase/analytics';
 
 const firebaseConfig = {
@@ -31,6 +32,10 @@ export const db = getFirestore(app);
 
 // Cloud Functions
 export const functions = getFunctions(app);
+
+// Cloud Storage (for DOCX binaries)
+export const storage = getStorage(app);
+export { storageRef, uploadBytes, getBlob, deleteObject };
 
 // Analytics - only initialize in browser environment
 let analytics = null;

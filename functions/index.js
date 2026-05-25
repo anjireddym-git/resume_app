@@ -88,6 +88,9 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
       case 'extractResumeFromFile':
         result = await extractResumeFromFile(aiClient, model, provider, data.base64Data, data.mimeType);
         break;
+      case 'parseDocxToFieldMap':
+        result = await parseDocxToFieldMap(aiClient, model, provider, data.base64Data);
+        break;
       case 'editField':
         result = await editField(aiClient, model, provider, data.currentValue, data.userPrompt, data.fieldType);
         break;
@@ -456,41 +459,261 @@ async function editField(aiClient, model, provider, currentValue, userPrompt, fi
   return text.trim();
 }
 
-async function extractResumeFromFile(aiClient, model, provider, base64Data, mimeType) {
-  const mammoth = require('mammoth');
-  
-  const prompt = `Extract all resume information into structured JSON format:
-{
-  "personalInfo": { "name": "", "title": "", "email": "", "phone": "", "location": "", "linkedin": "", "github": "" },
-  "summary": "",
-  "experience": [{ "company": "", "position": "", "location": "", "startDate": "YYYY-MM", "endDate": "YYYY-MM or Present", "highlights": [] }],
-  "education": [{ "institution": "", "degree": "", "location": "", "graduationDate": "YYYY-MM", "gpa": "", "highlights": [] }],
-  "skills": { "languages": [], "frameworks": [], "tools": [], "databases": [], "other": [] },
-  "projects": [{ "name": "", "description": "", "technologies": [], "highlights": [] }],
-  "certifications": [{ "name": "", "issuer": "", "date": "YYYY-MM" }]
+// ----------------------------------------------------------------------------
+// DOCX layout extraction (Phase 2)
+// Parses the raw XML inside the .docx ZIP to recover page margins, column
+// count, dominant font family/size, and heading colors. Returns a partial
+// layoutConfig object; missing fields are filled by the client.
+// ----------------------------------------------------------------------------
+async function extractLayoutFromDocx(buffer) {
+  try {
+    const JSZip = require('jszip');
+    const zip = await JSZip.loadAsync(buffer);
+
+    const readSafe = async (path) => {
+      const f = zip.file(path);
+      return f ? await f.async('string') : '';
+    };
+
+    const documentXml = await readSafe('word/document.xml');
+    const stylesXml = await readSafe('word/styles.xml');
+    const themeXml = await readSafe('word/theme/theme1.xml');
+
+    const layout = {};
+
+    // ---- Page margins (<w:pgMar w:top=".." w:right=".." w:bottom=".." w:left=".." />)
+    // Values are twentieths of a point; 1 pt = 20 twips.
+    const pgMarMatch = documentXml.match(/<w:pgMar\b[^/]*\/>/);
+    if (pgMarMatch) {
+      const tag = pgMarMatch[0];
+      const get = (attr) => {
+        const m = tag.match(new RegExp(`w:${attr}="(-?\\d+)"`));
+        return m ? Math.round(parseInt(m[1], 10) / 20) : undefined;
+      };
+      const top = get('top'), right = get('right'), bottom = get('bottom'), left = get('left');
+      if (top || right || bottom || left) {
+        layout.pageMargins = {
+          top: top ?? 36,
+          right: right ?? 40,
+          bottom: bottom ?? 36,
+          left: left ?? 40,
+        };
+      }
+    }
+
+    // ---- Column count (<w:cols w:num="2" .../>)
+    const colsMatch = documentXml.match(/<w:cols\b[^/]*\/>/);
+    if (colsMatch) {
+      const numMatch = colsMatch[0].match(/w:num="(\d+)"/);
+      if (numMatch) {
+        const n = parseInt(numMatch[1], 10);
+        layout.columns = n >= 2 ? 2 : 1;
+      }
+    }
+
+    // ---- Dominant body font (first <w:rFonts w:ascii="..."/> in styles.xml)
+    const fontMatch = stylesXml.match(/<w:rFonts\b[^>]*w:ascii="([^"]+)"/);
+    const bodyFont = fontMatch ? fontMatch[1] : null;
+
+    // ---- Default body font size (<w:sz w:val="22"/> in docDefaults; in half-points)
+    const szMatch = stylesXml.match(/<w:docDefaults>[\s\S]*?<w:sz\s+w:val="(\d+)"/);
+    const bodySize = szMatch ? Math.round(parseInt(szMatch[1], 10) / 2) : null;
+
+    // ---- Heading 1 color (first <w:color w:val=".."/> inside Heading1 style)
+    const heading1Block = stylesXml.match(/<w:style[^>]*w:styleId="Heading1"[\s\S]*?<\/w:style>/);
+    let headingColor = null;
+    if (heading1Block) {
+      const cm = heading1Block[0].match(/<w:color\s+w:val="([0-9a-fA-F]{6})"/);
+      if (cm) headingColor = '#' + cm[1].toLowerCase();
+    }
+
+    // ---- Heading 1 font size
+    const h1SizeMatch = heading1Block ? heading1Block[0].match(/<w:sz\s+w:val="(\d+)"/) : null;
+    const headingSize = h1SizeMatch ? Math.round(parseInt(h1SizeMatch[1], 10) / 2) : null;
+
+    // ---- Theme accent color (first <a:srgbClr val=".."/> in theme1.xml)
+    let accentColor = null;
+    if (themeXml) {
+      const acc = themeXml.match(/<a:accent1>[\s\S]*?<a:srgbClr\s+val="([0-9a-fA-F]{6})"/);
+      if (acc) accentColor = '#' + acc[1].toLowerCase();
+    }
+
+    // ---- Build partial fonts object
+    if (bodyFont || bodySize) {
+      layout.fonts = {
+        body: { ...(bodyFont ? { family: bodyFont } : {}), ...(bodySize ? { size: bodySize } : {}) },
+      };
+      if (bodyFont) {
+        layout.fonts.name = { family: bodyFont };
+        layout.fonts.sectionHeader = { family: bodyFont };
+      }
+      if (headingSize) {
+        layout.fonts.sectionHeader = { ...(layout.fonts.sectionHeader || {}), size: headingSize };
+      }
+      if (headingColor) {
+        layout.fonts.sectionHeader = { ...(layout.fonts.sectionHeader || {}), color: headingColor };
+      }
+    }
+
+    // ---- Colors
+    if (headingColor || accentColor) {
+      layout.colors = {
+        primary: headingColor || accentColor,
+      };
+    }
+
+    // ---- Section header style heuristic: if Heading1 has bottom border -> underline
+    if (heading1Block && /<w:bdr[^>]*w:val="single"/.test(heading1Block[0])) {
+      layout.sectionHeader = { style: 'underline' };
+    }
+
+    console.log('[docx-layout] extracted:', JSON.stringify(layout));
+    return layout;
+  } catch (err) {
+    console.warn('[docx-layout] extraction failed (non-fatal):', err.message);
+    return {};
+  }
 }
 
-Return ONLY valid JSON.`;
+async function extractResumeFromFile(aiClient, model, provider, base64Data, mimeType) {
+  const mammoth = require('mammoth');
+
+  // Prompt that asks for BOTH content and visual layout in one call.
+  // We use a wrapper object so the model returns a single JSON with two keys.
+  const prompt = `You are a resume parser. From the provided resume file, extract TWO things:
+
+1) "content": structured resume data
+2) "layout": a description of the resume's VISUAL layout (fonts, colors, columns, header style)
+
+Return ONLY a single JSON object with this exact shape:
+{
+  "content": {
+    "personalInfo": { "name": "", "title": "", "email": "", "phone": "", "location": "", "linkedin": "", "github": "" },
+    "summary": "",
+    "experience": [{ "company": "", "position": "", "location": "", "startDate": "YYYY-MM", "endDate": "YYYY-MM or Present", "highlights": [] }],
+    "education": [{ "institution": "", "degree": "", "location": "", "graduationDate": "YYYY-MM", "gpa": "", "highlights": [] }],
+    "skills": { "languages": [], "frameworks": [], "tools": [], "databases": [], "other": [] },
+    "projects": [{ "name": "", "description": "", "technologies": [], "highlights": [] }],
+    "certifications": [{ "name": "", "issuer": "", "date": "YYYY-MM" }],
+    "customSections": [{ "id": "publications", "title": "Publications", "content": "markdown text..." }]
+  },
+  "layout": {
+    "columns": 1,
+    "columnSplit": 0.33,
+    "columnAssignment": { "skills": "left", "education": "left", "experience": "right" },
+    "pageMargins": { "top": 36, "right": 40, "bottom": 36, "left": 40 },
+    "header": { "layout": "centered", "contactStyle": "row", "showTitle": true },
+    "fonts": {
+      "name":          { "family": "Helvetica", "size": 22, "weight": "bold",   "color": "#111111" },
+      "title":         { "family": "Helvetica", "size": 11, "weight": "normal", "color": "#555555" },
+      "sectionHeader": { "family": "Helvetica", "size": 11, "weight": "bold",   "color": "#111111" },
+      "body":          { "family": "Helvetica", "size": 10, "weight": "normal", "color": "#222222" },
+      "dates":         { "family": "Helvetica", "size":  9, "weight": "normal", "color": "#666666" }
+    },
+    "colors": { "primary": "#111111", "text": "#222222", "muted": "#666666", "background": "#ffffff", "sidebarBg": "#f5f5f5", "divider": "#dddddd" },
+    "sectionHeader": { "style": "underline", "uppercase": true, "spacingTop": 10, "spacingBottom": 4 },
+    "spacing": { "sectionGap": 10, "itemGap": 6, "bulletGap": 2, "lineHeight": 1.4 },
+    "sectionOrder": ["summary", "skills", "experience", "education", "projects", "certifications"]
+  }
+}
+
+LAYOUT RULES:
+- "columns": 2 ONLY if the resume clearly has a sidebar (e.g., contact/skills column on the left, experience on the right). Otherwise 1.
+- "header.layout": "centered" if name is centered, "left" if left-aligned, "twoColumn" if name on one side and contact on the other.
+- "sectionHeader.style": "underline" if section titles have a horizontal line under them; "background" if they have a colored block behind; "border-left" for left bars; "uppercase" for ALL-CAPS only; "plain" otherwise.
+- "fonts.*.family": use the closest web-safe family name ("Helvetica", "Arial", "Times New Roman", "Georgia", "Courier", "Verdana").
+- Colors must be 6-digit hex like "#1a2b3c". Use the actual colors you observe.
+- "customSections": include ONLY sections that are NOT one of {summary, experience, education, skills, projects, certifications, internships, hackathons}. Keep custom section content as plain text / markdown.
+
+Return ONLY valid JSON. No prose, no markdown fences.`;
 
   const isDocx = mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
   const isPdf = mimeType === 'application/pdf';
-  
-  // Default structure for response
-  const defaultStructure = {
+
+  // Default content structure (filled in if model omits fields).
+  const defaultContent = {
     personalInfo: { name: '', title: '', email: '', phone: '', location: '', linkedin: '', github: '' },
     summary: '',
     experience: [],
     education: [],
     skills: { languages: [], frameworks: [], tools: [], databases: [] },
     projects: [],
-    certifications: []
+    certifications: [],
+    customSections: []
   };
 
-  // For Gemini with PDF, try direct file upload first
+  // Helper: parse the wrapper { content, layout } shape, tolerating either a
+  // bare resume object (legacy) or the new wrapper. Robust to surrounding
+  // prose and partial fences.
+  const parseWrapper = (text) => {
+    if (!text || typeof text !== 'string') {
+      throw new Error('AI returned empty response');
+    }
+    // Strip code fences.
+    let cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+
+    // If there's surrounding prose, grab the first balanced {...} block.
+    if (!cleaned.startsWith('{')) {
+      const start = cleaned.indexOf('{');
+      if (start === -1) {
+        console.error('No JSON object found in AI response. Raw text:', text.slice(0, 500));
+        throw new Error('AI response did not contain JSON');
+      }
+      let depth = 0, end = -1;
+      for (let i = start; i < cleaned.length; i++) {
+        const ch = cleaned[i];
+        if (ch === '{') depth++;
+        else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end === -1) {
+        console.error('Unbalanced JSON in AI response. Raw text:', text.slice(0, 500));
+        throw new Error('AI response JSON was malformed');
+      }
+      cleaned = cleaned.slice(start, end + 1);
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (e) {
+      console.error('JSON.parse failed. Cleaned text:', cleaned.slice(0, 500));
+      throw new Error('AI response was not valid JSON: ' + e.message);
+    }
+
+    if (parsed && (parsed.content || parsed.layout)) {
+      return {
+        content: parsed.content || {},
+        layout: parsed.layout || {},
+      };
+    }
+    // Legacy bare resume -> treat as content only.
+    return { content: parsed, layout: {} };
+  };
+
+  const finalize = (content, layout) => {
+    const merged = {
+      ...defaultContent,
+      ...content,
+      personalInfo: { ...defaultContent.personalInfo, ...(content?.personalInfo || {}) },
+      skills: { ...defaultContent.skills, ...(content?.skills || {}) },
+      customSections: Array.isArray(content?.customSections) ? content.customSections : [],
+    };
+    return { content: merged, layout: layout || {} };
+  };
+
+  // ----- Pre-parse DOCX layout from raw XML (no AI cost) ------------------
+  let docxLayoutHint = {};
+  let docxBuffer = null;
+  if (isDocx) {
+    docxBuffer = Buffer.from(base64Data, 'base64');
+    docxLayoutHint = await extractLayoutFromDocx(docxBuffer);
+  }
+
+  // ----- Path 1: Gemini + PDF -> direct file upload ------------------------
   if (provider === 'gemini' && isPdf) {
     try {
-      console.log(`Attempting direct file extraction with Gemini for MIME type: ${mimeType}`);
-      
+      console.log(`Attempting direct PDF extraction with Gemini (${mimeType})`);
+
       const response = await aiClient.models.generateContent({
         model,
         contents: [
@@ -501,63 +724,85 @@ Return ONLY valid JSON.`;
               { text: prompt }
             ]
           }
-        ]
+        ],
+        config: {
+          responseMimeType: 'application/json',
+        }
       });
 
-      let text = response.text;
-      text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      
-      const resumeData = JSON.parse(text);
-      console.log('Direct extraction successful');
-      
-      return {
-        ...defaultStructure,
-        ...resumeData,
-        personalInfo: { ...defaultStructure.personalInfo, ...resumeData.personalInfo },
-        skills: { ...defaultStructure.skills, ...resumeData.skills }
-      };
+      const rawText = response.text;
+      console.log('Gemini direct PDF response length:', rawText?.length || 0);
+      const { content, layout } = parseWrapper(rawText);
+      const contentKeys = Object.keys(content || {});
+      console.log('Direct PDF extraction successful. Content keys:', contentKeys.join(','));
+      if (contentKeys.length === 0 || (!content.personalInfo && !content.experience && !content.summary)) {
+        console.error('Direct PDF extraction returned empty content. Falling back. Raw:', rawText?.slice(0, 500));
+        throw new Error('Direct extraction returned empty content');
+      }
+      return finalize(content, layout);
     } catch (directError) {
-      console.log('Direct extraction failed, falling back to text extraction:', directError.message);
+      console.log('Direct extraction failed, falling back to text:', directError.message);
+    }
+
+    // ----- Path 1b: Gemini + PDF retry with simpler content-only prompt ----
+    try {
+      console.log('Retrying PDF extraction with simpler content-only prompt');
+      const simplePrompt = `Extract structured resume data from the attached file as JSON. Return ONLY valid JSON (no prose, no markdown) with this shape:
+{
+  "personalInfo": { "name": "", "title": "", "email": "", "phone": "", "location": "", "linkedin": "", "github": "" },
+  "summary": "",
+  "experience": [{ "company": "", "position": "", "location": "", "startDate": "YYYY-MM", "endDate": "YYYY-MM or Present", "highlights": [] }],
+  "education": [{ "institution": "", "degree": "", "location": "", "graduationDate": "YYYY-MM", "gpa": "", "highlights": [] }],
+  "skills": { "languages": [], "frameworks": [], "tools": [], "databases": [], "other": [] },
+  "projects": [{ "name": "", "description": "", "technologies": [], "highlights": [] }],
+  "certifications": [{ "name": "", "issuer": "", "date": "YYYY-MM" }]
+}`;
+      const response = await aiClient.models.generateContent({
+        model,
+        contents: [{ role: 'user', parts: [{ inlineData: { mimeType, data: base64Data } }, { text: simplePrompt }] }],
+        config: { responseMimeType: 'application/json' },
+      });
+      const rawText = response.text;
+      console.log('Gemini PDF retry response length:', rawText?.length || 0);
+      const { content } = parseWrapper(rawText);
+      if (!content || (!content.personalInfo && !content.experience && !content.summary)) {
+        throw new Error('Retry returned empty content');
+      }
+      console.log('PDF retry extraction successful');
+      return finalize(content, {});
+    } catch (retryError) {
+      console.error('PDF retry also failed:', retryError.message);
+      // If we have no text path available for PDF, surface a clear error.
+      if (isPdf) {
+        throw new Error(`PDF extraction failed: ${retryError.message}`);
+      }
     }
   }
 
-  // For DOCX or OpenAI provider, extract text first then send to AI
+  // ----- Path 2: DOCX / OpenAI -> text extraction first --------------------
   console.log('Using text extraction approach...');
-  
+
   try {
     let extractedText = '';
-    
+
     if (isDocx) {
-      // Convert base64 to buffer for mammoth
-      const buffer = Buffer.from(base64Data, 'base64');
-      
-      // Use convertToHtml to preserve structure (bullets, headings, paragraphs)
-      // then convert to structured text format that preserves sections
-      const mammothResult = await mammoth.convertToHtml({ buffer });
+      const mammothResult = await mammoth.convertToHtml({ buffer: docxBuffer });
       const htmlContent = mammothResult.value;
-      
-      // Convert HTML to structured text that preserves formatting
-      // This helps the AI better identify resume sections
+
       extractedText = htmlContent
-        // Preserve line breaks for major elements
         .replace(/<\/h[1-6]>/gi, '\n\n')
         .replace(/<\/p>/gi, '\n')
         .replace(/<\/li>/gi, '\n')
         .replace(/<\/tr>/gi, '\n')
         .replace(/<br\s*\/?>/gi, '\n')
-        // Add bullet markers for list items
         .replace(/<li[^>]*>/gi, '• ')
-        // Add section markers for headings
         .replace(/<h1[^>]*>/gi, '\n=== ')
         .replace(/<h2[^>]*>/gi, '\n== ')
         .replace(/<h3[^>]*>/gi, '\n= ')
         .replace(/<h[4-6][^>]*>/gi, '\n')
-        // Preserve bold text markers (often used for job titles, companies)
         .replace(/<strong[^>]*>|<b[^>]*>/gi, '**')
         .replace(/<\/strong>|<\/b>/gi, '**')
-        // Remove all remaining HTML tags
         .replace(/<[^>]+>/g, '')
-        // Decode HTML entities
         .replace(/&nbsp;/g, ' ')
         .replace(/&amp;/g, '&')
         .replace(/&lt;/g, '<')
@@ -567,48 +812,459 @@ Return ONLY valid JSON.`;
         .replace(/&mdash;/g, '—')
         .replace(/&ndash;/g, '–')
         .replace(/&bull;/g, '•')
-        // Clean up excessive whitespace while preserving structure
         .replace(/\n\s*\n\s*\n/g, '\n\n')
         .replace(/[ \t]+/g, ' ')
         .trim();
-      
+
       console.log(`DOCX HTML extraction found ${mammothResult.messages?.length || 0} warnings`);
     } else if (isPdf) {
-      // For OpenAI with PDF, we need to use a different approach
-      // Since there's no pdftotext built-in, we'll try Gemini-style direct for now
-      // or throw an error asking for DOCX
       if (provider === 'openai') {
         throw new Error('OpenAI models cannot directly process PDF files. Please upload a DOCX file or use a Gemini model for PDF processing.');
       }
     }
-    
+
     if (!extractedText || extractedText.trim().length === 0) {
       throw new Error('No text content extracted from file');
     }
-    
+
     console.log(`Extracted ${extractedText.length} characters from file`);
-    
-    // Send extracted text to AI for structured parsing
+
     const textPrompt = `${prompt}
 
 RESUME TEXT:
 ${extractedText}`;
 
-    let responseText = await callAIText(aiClient, model, provider, textPrompt);
-    responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    
-    const resumeData = JSON.parse(responseText);
-    console.log('Text extraction approach successful');
-    
-    return {
-      ...defaultStructure,
-      ...resumeData,
-      personalInfo: { ...defaultStructure.personalInfo, ...resumeData.personalInfo },
-      skills: { ...defaultStructure.skills, ...resumeData.skills }
-    };
+    // Use callAIText for text extraction — avoids responseMimeType which can
+    // cause Gemini to return the schema template with empty placeholder values.
+    const responseText = await callAIText(aiClient, model, provider, textPrompt);
+    console.log('Text extraction response length:', responseText?.length || 0);
+    let content, layout;
+    try {
+      ({ content, layout } = parseWrapper(responseText));
+    } catch (parseErr) {
+      // Retry once with simpler content-only prompt (no wrapper, no layout)
+      console.log('Wrapper parse failed, retrying with simpler prompt:', parseErr.message);
+      const simplePrompt = `Extract resume data from the following text. Return ONLY a valid JSON object — no prose, no markdown fences — with these keys: personalInfo (name, title, email, phone, location, linkedin, github), summary (string), experience (array of {company, position, location, startDate, endDate, highlights[]}), education (array of {institution, degree, location, graduationDate, gpa}), skills ({languages, frameworks, tools, databases, other} — all arrays), projects (array of {name, description, technologies[], highlights[]}), certifications (array of {name, issuer, date}). Fill in the ACTUAL values from the resume text — do not leave any field empty if the information is present.\n\nRESUME TEXT:\n${extractedText}`;
+      const retryText = await callAIText(aiClient, model, provider, simplePrompt);
+      ({ content, layout } = parseWrapper(retryText));
+    }
+    if (!content || (!content.personalInfo && !content.experience && !content.summary)) {
+      throw new Error('Text extraction returned empty resume content');
+    }
+    console.log('Text extraction approach successful. Content keys:', Object.keys(content).join(','));
+    console.log('Extracted personalInfo:', JSON.stringify(content.personalInfo || {}));
+    console.log('Experience count:', (content.experience || []).length, '| Skills keys:', Object.keys(content.skills || {}).join(','));
+
+    // For DOCX, merge XML-extracted layout hints OVER the AI-detected layout
+    // since the XML is authoritative for margins / column counts / fonts.
+    const mergedLayout = deepMergeLayout(layout || {}, docxLayoutHint);
+
+    return finalize(content, mergedLayout);
   } catch (extractError) {
     console.error('Text extraction failed:', extractError.message);
     throw new Error(`Failed to extract resume data: ${extractError.message}`);
+  }
+}
+
+// Shallow-ish deep merge for layout hint objects (XML wins over AI guess).
+function deepMergeLayout(base, override) {
+  if (!override || typeof override !== 'object') return base;
+  const out = { ...base };
+  for (const k of Object.keys(override)) {
+    const a = base[k];
+    const b = override[k];
+    if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && !Array.isArray(b)) {
+      out[k] = deepMergeLayout(a, b);
+    } else {
+      out[k] = b;
+    }
+  }
+  return out;
+}
+
+// ============================================================================
+// DOCX Field-Map Parsing (new DOCX-native pipeline)
+// ============================================================================
+
+/**
+ * Walk a DOCX XML string and produce a flat list of paragraphs in document
+ * order. Mirrors the client-side walker in src/services/docxXmlService.js so
+ * paragraph IDs match between client and server.
+ *
+ * Returns: [{ pId, plainText }]
+ */
+function walkParagraphsForServer(xml) {
+  const out = [];
+  const tblRegex = /<w:tbl(\s[^>]*)?>([\s\S]*?)<\/w:tbl>/g;
+  const tables = [];
+  let m;
+  while ((m = tblRegex.exec(xml)) !== null) {
+    tables.push({ start: m.index, end: m.index + m[0].length, body: m[2] });
+  }
+
+  const buildRecord = (pId, pBlock) => {
+    const runRegex = /<w:r(\s[^>]*)?>([\s\S]*?)<\/w:r>/g;
+    let text = '';
+    let rm;
+    while ((rm = runRegex.exec(pBlock)) !== null) {
+      const runBody = rm[2];
+      const textRegex = /<w:t(\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+      let tm;
+      while ((tm = textRegex.exec(runBody)) !== null) {
+        text += tm[2];
+      }
+    }
+    return {
+      pId,
+      plainText: text
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'"),
+    };
+  };
+
+  tables.forEach((tbl, tIdx) => {
+    const rowRegex = /<w:tr(\s[^>]*)?>([\s\S]*?)<\/w:tr>/g;
+    let rowMatch;
+    let rowIdx = 0;
+    while ((rowMatch = rowRegex.exec(tbl.body)) !== null) {
+      const cellRegex = /<w:tc(\s[^>]*)?>([\s\S]*?)<\/w:tc>/g;
+      let cellMatch;
+      let cellIdx = 0;
+      while ((cellMatch = cellRegex.exec(rowMatch[2])) !== null) {
+        const cellPRegex = /<w:p(\s[^>]*)?>([\s\S]*?)<\/w:p>/g;
+        let cellPMatch;
+        let cellPIdx = 0;
+        while ((cellPMatch = cellPRegex.exec(cellMatch[2])) !== null) {
+          out.push(buildRecord(`t${tIdx}.r${rowIdx}.c${cellIdx}.p${cellPIdx}`, cellPMatch[0]));
+          cellPIdx++;
+        }
+        cellIdx++;
+      }
+      rowIdx++;
+    }
+  });
+
+  const pRegex = /<w:p(\s[^>]*)?>([\s\S]*?)<\/w:p>/g;
+  let topLevelPIdx = 0;
+  while ((m = pRegex.exec(xml)) !== null) {
+    const start = m.index;
+    const inTable = tables.some((t) => start >= t.start && start < t.end);
+    if (inTable) continue;
+    out.push(buildRecord(`p${topLevelPIdx}`, m[0]));
+    topLevelPIdx++;
+  }
+  return out;
+}
+
+/**
+ * Parse a DOCX file into a field map suitable for the new DOCX-native editor.
+ *
+ * Pipeline:
+ *   1. Unzip the DOCX with JSZip.
+ *   2. Walk word/document.xml → list of { pId, plainText } paragraphs.
+ *   3. Ask the AI to classify each paragraph into a logical field.
+ *   4. Resolve the AI's classification into a field-ID → { nodeIds[] } map.
+ *      For paragraphs with multiple logical fields (e.g. "Google · NYC ·
+ *      2022 – Present"), the AI returns sub-spans by substring; we map each
+ *      span to its containing run IDs.
+ *
+ * Output:
+ *   {
+ *     sections: [{ id, label, type }],
+ *     fields: {
+ *       [fieldId]: {
+ *         sectionId, itemIndex, fieldType, label, value, nodeIds: [pId.rN, ...]
+ *       }
+ *     },
+ *     extractedText: "...flat reconstruction for AI matching..."
+ *   }
+ */
+async function parseDocxToFieldMap(aiClient, model, provider, base64Data) {
+  const JSZip = require('jszip');
+
+  if (!base64Data) throw new HttpsError('invalid-argument', 'base64Data is required');
+
+  const buffer = Buffer.from(base64Data, 'base64');
+  const zip = await JSZip.loadAsync(buffer);
+  const docXml = await zip.file('word/document.xml')?.async('string');
+  if (!docXml) throw new HttpsError('invalid-argument', 'Invalid DOCX: missing document.xml');
+
+  const paragraphs = walkParagraphsForServer(docXml);
+
+  // Skip empty paragraphs from AI classification but keep them in the index so
+  // pIds remain consistent with the client.
+  const nonEmpty = paragraphs.filter((p) => p.plainText.trim().length > 0);
+
+  const numberedText = nonEmpty
+    .map((p, i) => `[${i}] (${p.pId}) ${p.plainText}`)
+    .join('\n');
+
+  const prompt = `You are a resume structure analyzer. Below is the linear text of a resume DOCX, one paragraph per line, with an index and a paragraph ID:
+
+${numberedText}
+
+Classify EVERY paragraph into a logical field. Return STRICT JSON in this exact shape:
+
+{
+  "sections": [
+    { "id": "header",      "label": "Header",      "type": "header" },
+    { "id": "summary",     "label": "Summary",     "type": "summary" },
+    { "id": "experience",  "label": "Experience",  "type": "experience" },
+    { "id": "education",   "label": "Education",   "type": "education" },
+    { "id": "skills",      "label": "Skills",      "type": "skills" },
+    { "id": "projects",    "label": "Projects",    "type": "projects" },
+    { "id": "certifications", "label": "Certifications", "type": "certifications" }
+  ],
+  "assignments": [
+    { "pId": "p0", "section": "header", "item": 0, "field": "name" },
+    { "pId": "p1", "section": "header", "item": 0, "field": "contact",
+      "splits": [
+        { "text": "john@email.com", "field": "email" },
+        { "text": "555-1234",       "field": "phone" },
+        { "text": "linkedin.com/in/jdoe", "field": "linkedin" }
+      ]
+    },
+    { "pId": "p2", "section": "experience", "item": -1, "field": "section-header" },
+    { "pId": "p3", "section": "experience", "item": 0,  "field": "position" },
+    { "pId": "p4", "section": "experience", "item": 0,  "field": "company-line",
+      "splits": [
+        { "text": "Google",            "field": "company" },
+        { "text": "NYC",               "field": "location" },
+        { "text": "2022 - Present",    "field": "dates" }
+      ]
+    },
+    { "pId": "p5", "section": "experience", "item": 0,  "field": "highlight", "highlightIndex": 0 }
+  ]
+}
+
+RULES:
+- Include "sections" ONLY for sections that actually appear in this resume; preserve their order of appearance.
+- Every paragraph in the input MUST appear in "assignments" exactly once, identified by its pId.
+- "section" must be one of the section ids you listed above, OR "unknown" if you cannot classify.
+- "item" is the 0-based index of the entry within the section (e.g. experience 0, 1, 2...). Use -1 for section headers and for fields that are not part of a repeating item (e.g. summary text, skill lists).
+- "field" semantic vocabulary:
+    header:        name | title | contact | email | phone | location | linkedin | github | website
+    summary:       summary
+    experience:    section-header | position | company | dates | location | company-line | highlight | environment
+    education:     section-header | institution | degree | dates | location | gpa | highlight
+    skills:        section-header | skill-line | category
+    projects:      section-header | name | description | technologies | highlight | link
+    certifications:section-header | certification
+    unknown:       unknown
+- "splits" is REQUIRED when one paragraph holds multiple logical fields on a single line (e.g. "Company · Location · Dates"). Each split.text MUST be a substring that appears verbatim in the paragraph text. Splits should cover the whole line (separators may be omitted).
+- "highlightIndex" is the 0-based bullet index within the parent item (only for "highlight" fields).
+- Return JSON ONLY. No code fences, no prose.`;
+
+  const raw = await callAIText(aiClient, model, provider, prompt);
+  const parsed = parseStrictJson(raw);
+
+  if (!parsed || !Array.isArray(parsed.assignments)) {
+    throw new HttpsError('internal', 'AI did not return a valid field-map structure');
+  }
+
+  // Build paragraph-text lookup so we can resolve splits to run IDs.
+  const pTextById = new Map(paragraphs.map((p) => [p.pId, p.plainText]));
+  // Build run index per paragraph: pId -> [{ rId, text }]
+  const runsByParagraph = indexRunsServerSide(docXml);
+
+  const fields = {};
+  const extractedTextParts = [];
+
+  for (const a of parsed.assignments) {
+    const pId = a.pId;
+    const runs = runsByParagraph.get(pId) || [];
+    if (runs.length === 0) continue;
+
+    const section = a.section || 'unknown';
+    const itemIndex = typeof a.item === 'number' ? a.item : -1;
+    const baseId = `${section}-${itemIndex}-${a.field || 'text'}`;
+
+    if (Array.isArray(a.splits) && a.splits.length > 0) {
+      // Resolve each split to the runs whose concatenated text contains its substring.
+      const paraText = pTextById.get(pId) || '';
+      for (let s = 0; s < a.splits.length; s++) {
+        const sp = a.splits[s];
+        const spText = String(sp?.text ?? '').trim();
+        if (!spText) continue;
+        const startOffset = paraText.indexOf(spText);
+        if (startOffset === -1) continue;
+        const endOffset = startOffset + spText.length;
+        const nodeIds = runsOverlapping(runs, startOffset, endOffset);
+        if (nodeIds.length === 0) continue;
+        const splitField = sp.field || `${a.field}-${s}`;
+        const fieldId = `${section}-${itemIndex}-${splitField}${s > 0 ? `-${s}` : ''}`;
+        fields[fieldId] = {
+          sectionId: section,
+          itemIndex,
+          fieldType: splitField,
+          label: splitField,
+          value: spText,
+          nodeIds,
+          pId,
+        };
+        extractedTextParts.push(spText);
+      }
+    } else {
+      // Whole paragraph maps to a single field.
+      const nodeIds = runs.map((r) => r.rId);
+      const fullText = pTextById.get(pId) || '';
+      // Skip pure section-header rows from the editable field set, but still
+      // track them for context.
+      const isHeader = a.field === 'section-header';
+      let fieldId = baseId;
+      if (a.field === 'highlight' && typeof a.highlightIndex === 'number') {
+        fieldId = `${section}-${itemIndex}-highlight-${a.highlightIndex}`;
+      } else if (fields[fieldId]) {
+        // Disambiguate accidental duplicates.
+        fieldId = `${fieldId}-${pId}`;
+      }
+      fields[fieldId] = {
+        sectionId: section,
+        itemIndex,
+        fieldType: a.field || 'text',
+        label: a.field || 'text',
+        value: fullText,
+        nodeIds,
+        pId,
+        isHeader: isHeader || undefined,
+      };
+      extractedTextParts.push(fullText);
+    }
+  }
+
+  const sections = Array.isArray(parsed.sections) ? parsed.sections : [];
+  return {
+    sections,
+    fields,
+    extractedText: extractedTextParts.join('\n'),
+  };
+}
+
+/**
+ * Per-paragraph run index used by parseDocxToFieldMap to resolve splits to
+ * specific runs. Each run record carries its start/end character offsets
+ * within the paragraph's plain text so we can match substring spans.
+ */
+function indexRunsServerSide(xml) {
+  const out = new Map();
+
+  const indexParagraph = (pId, pBlock) => {
+    const runRegex = /<w:r(\s[^>]*)?>([\s\S]*?)<\/w:r>/g;
+    const records = [];
+    let rIdx = 0;
+    let offset = 0;
+    let rm;
+    while ((rm = runRegex.exec(pBlock)) !== null) {
+      const runBody = rm[2];
+      const textRegex = /<w:t(\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+      let text = '';
+      let tm;
+      while ((tm = textRegex.exec(runBody)) !== null) {
+        text += tm[2];
+      }
+      text = text
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'");
+      const start = offset;
+      const end = offset + text.length;
+      records.push({ rId: `${pId}.r${rIdx}`, text, start, end });
+      offset = end;
+      rIdx++;
+    }
+    out.set(pId, records);
+  };
+
+  const tblRegex = /<w:tbl(\s[^>]*)?>([\s\S]*?)<\/w:tbl>/g;
+  const tables = [];
+  let m;
+  while ((m = tblRegex.exec(xml)) !== null) {
+    tables.push({ start: m.index, end: m.index + m[0].length, body: m[2] });
+  }
+
+  tables.forEach((tbl, tIdx) => {
+    const rowRegex = /<w:tr(\s[^>]*)?>([\s\S]*?)<\/w:tr>/g;
+    let rowMatch;
+    let rowIdx = 0;
+    while ((rowMatch = rowRegex.exec(tbl.body)) !== null) {
+      const cellRegex = /<w:tc(\s[^>]*)?>([\s\S]*?)<\/w:tc>/g;
+      let cellMatch;
+      let cellIdx = 0;
+      while ((cellMatch = cellRegex.exec(rowMatch[2])) !== null) {
+        const cellPRegex = /<w:p(\s[^>]*)?>([\s\S]*?)<\/w:p>/g;
+        let cellPMatch;
+        let cellPIdx = 0;
+        while ((cellPMatch = cellPRegex.exec(cellMatch[2])) !== null) {
+          indexParagraph(`t${tIdx}.r${rowIdx}.c${cellIdx}.p${cellPIdx}`, cellPMatch[0]);
+          cellPIdx++;
+        }
+        cellIdx++;
+      }
+      rowIdx++;
+    }
+  });
+
+  const pRegex = /<w:p(\s[^>]*)?>([\s\S]*?)<\/w:p>/g;
+  let topLevelPIdx = 0;
+  while ((m = pRegex.exec(xml)) !== null) {
+    const start = m.index;
+    const inTable = tables.some((t) => start >= t.start && start < t.end);
+    if (inTable) continue;
+    indexParagraph(`p${topLevelPIdx}`, m[0]);
+    topLevelPIdx++;
+  }
+
+  return out;
+}
+
+/**
+ * Return the run IDs whose character ranges overlap [startOffset, endOffset).
+ */
+function runsOverlapping(runs, startOffset, endOffset) {
+  const ids = [];
+  for (const r of runs) {
+    if (r.end <= startOffset) continue;
+    if (r.start >= endOffset) break;
+    ids.push(r.rId);
+  }
+  return ids;
+}
+
+/**
+ * Parse a strict-JSON AI response, tolerating optional code fences and
+ * surrounding prose.
+ */
+function parseStrictJson(text) {
+  if (!text || typeof text !== 'string') return null;
+  let cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+  if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+    const startObj = cleaned.indexOf('{');
+    const startArr = cleaned.indexOf('[');
+    const startIdx = startObj === -1 ? startArr : (startArr === -1 ? startObj : Math.min(startObj, startArr));
+    if (startIdx === -1) return null;
+    cleaned = cleaned.slice(startIdx);
+  }
+  // Balance scan
+  const open = cleaned[0];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let end = -1;
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (ch === open) depth++;
+    else if (ch === close) { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end === -1) return null;
+  try {
+    return JSON.parse(cleaned.slice(0, end + 1));
+  } catch (e) {
+    console.error('parseStrictJson failed:', e.message, cleaned.slice(0, 300));
+    return null;
   }
 }
 

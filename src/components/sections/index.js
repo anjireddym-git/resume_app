@@ -23,7 +23,7 @@ export const defaultSectionOrder = [
 // Section metadata for UI
 export const sectionMeta = {
   header: { label: 'Header', required: true, editable: true },
-  summary: { label: 'Summary', required: false, editable: true },
+  summary: { label: 'Professional Summary', required: false, editable: true },
   skills: { label: 'Technical Skills', required: false, editable: true },
   experience: { label: 'Experience', required: false, editable: true },
   education: { label: 'Education', required: false, editable: true },

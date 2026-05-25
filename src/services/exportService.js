@@ -1,6 +1,7 @@
 import { Document, Packer, Paragraph, TextRun, BorderStyle } from 'docx';
 import { saveAs } from 'file-saver';
 import { formatDate } from '../lib/dateUtils';
+import { getSummaryPoints } from '../lib/summaryUtils';
 
 // DOCX Export - keeping this as it's a different format
 export const exportToDOCX = async (resumeData, fileName = 'resume.docx') => {
@@ -76,8 +77,12 @@ export const exportToDOCX = async (resumeData, fileName = 'resume.docx') => {
 
   // Summary
   if (resumeData.summary) {
+    const summaryPoints = getSummaryPoints(resumeData.summary);
     sections.push({
-      children: [makeParagraph('Summary', { bold: true, color: colors.muted, size: 20 }), makeParagraph(resumeData.summary, { size: 20 })],
+      children: [
+        makeParagraph('Professional Summary', { bold: true, color: colors.muted, size: 20 }),
+        ...summaryPoints.map((point) => makeBullet(point)),
+      ],
     });
   }
 

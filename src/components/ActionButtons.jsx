@@ -2,11 +2,12 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { Download, FileText, RotateCcw, Loader2 } from 'lucide-react';
 import { pdf } from '@react-pdf/renderer';
 import UnifiedPDF from '../templates/UnifiedPDF';
+import LayoutPreservingPDF from '../templates/LayoutPreservingPDF';
 import { exportToDOCX } from '../services/exportService';
 import { analyticsService } from '../services/analyticsService';
 import { saveAs } from 'file-saver';
 
-const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onReset, hasChanges }) => {
+const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onReset, hasChanges, layoutSource, layoutConfig, visibleSections, customSectionDefs }) => {
   const [isExportingDOCX, setIsExportingDOCX] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
 
@@ -31,7 +32,15 @@ const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onRes
       const fileName = getFileName('pdf');
       
       // Generate PDF blob using pdf() function
-      const pdfDocument = (
+      const pdfDocument = layoutSource === 'uploaded' ? (
+        <LayoutPreservingPDF
+          resumeData={resumeData}
+          layoutConfig={layoutConfig}
+          sectionOrder={sectionOrder}
+          visibleSections={visibleSections}
+          customSectionDefs={customSectionDefs}
+        />
+      ) : (
         <UnifiedPDF 
           resumeData={resumeData} 
           themeConfig={themeConfig}
@@ -46,7 +55,7 @@ const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onRes
       saveAs(blob, fileName);
       
       // Track PDF export
-      analyticsService.trackExportPDF(resumeData?.id, 'unified');
+      analyticsService.trackExportPDF(resumeData?.id, layoutSource === 'uploaded' ? 'preserved-layout' : 'unified');
     } catch (err) {
       console.error('PDF generation failed:', err);
       alert('Failed to generate PDF. Please try again.');
@@ -54,7 +63,7 @@ const ActionButtons = ({ resumeRef, resumeData, themeConfig, sectionOrder, onRes
     } finally {
       setIsExportingPDF(false);
     }
-  }, [resumeData, themeConfig, sectionOrder, getFileName]);
+  }, [resumeData, themeConfig, sectionOrder, getFileName, layoutSource, layoutConfig, visibleSections, customSectionDefs]);
 
   const handleExportDOCX = async () => {
     if (!resumeData) {

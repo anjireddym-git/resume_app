@@ -4,9 +4,11 @@ import { SECTION_LABELS, DEFAULT_SECTION_ORDER } from '../config/templates';
 import { SECTION_FORMATS } from '../config/sectionFormats';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 import { formatDate } from '../lib/dateUtils';
+import { getSummaryPoints } from '../lib/summaryUtils';
 
 // Helper to get the current format or default
 const getFormat = (sectionFormats, sectionId) => {
+  if (sectionId === 'summary') return 'points';
   return sectionFormats?.[sectionId] || SECTION_FORMATS[sectionId]?.default || 'default';
 };
 
@@ -400,24 +402,15 @@ const UnifiedPDF = ({ resumeData, themeConfig, sectionOrder, sectionFormats = {}
   };
 
 
-  // SUMMARY - Uses sectionFormats.summary to determine display mode
-  // If 'points' mode: splits summary by newlines into bullets
-  // If 'paragraph' mode: renders as single paragraph
   const renderSummary = () => {
     const summaryText = data.summary?.trim();
     if (!summaryText) return null;
-    
-    const format = getFormat(sectionFormats, 'summary');
-    const isPointsMode = format === 'points';
-    
-    // Split summary by newlines for bullet points mode, filter out empty lines
-    const summaryLines = summaryText.split('\n').filter(line => line && line.trim());
-    const hasMultipleLines = summaryLines.length > 1;
+    const summaryLines = getSummaryPoints(summaryText);
     
     return (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>{SECTION_LABELS.summary}</Text>
-        {isPointsMode && hasMultipleLines ? (
+        {summaryLines.length > 0 ? (
           renderBullets(summaryLines)
         ) : (
           <Text style={styles.summary}>{summaryText}</Text>

@@ -20,9 +20,10 @@ const ResumeImport = ({ onImport, geminiService, disabled }) => {
     setIsImporting(true);
     setError('');
     try {
-      // Use Gemini to extract resume data from the file
-      const parsedResume = await extractResumeFromFile(geminiService, file);
-      onImport(parsedResume);
+      // New shape: { content, layout }. Pass both upward so callers that care
+      // about layout can use it; back-compat callers can ignore `layout`.
+      const parsed = await extractResumeFromFile(geminiService, file);
+      onImport(parsed.content, parsed.layout);
     } catch (error) {
       console.error('Import failed:', error);
       setError(error.message || 'Failed to import resume. Please try again.');
