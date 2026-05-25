@@ -1,4 +1,6 @@
 import ClassicTemplate from './ClassicTemplate';
+import LayoutPreservingTemplate from './LayoutPreservingTemplate';
+import LayoutPreservingPDF from './LayoutPreservingPDF';
 
 export const templates = {
   classic: {
@@ -17,4 +19,4 @@ export const getAllTemplates = () => {
   return Object.values(templates);
 };
 
-export { ClassicTemplate };
+export { ClassicTemplate, LayoutPreservingTemplate, LayoutPreservingPDF };

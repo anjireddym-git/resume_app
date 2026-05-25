@@ -2,19 +2,33 @@ import React, { useMemo } from 'react';
 import { BlobProvider } from '@react-pdf/renderer';
 import { Loader2, FileText, AlertCircle } from 'lucide-react';
 import UnifiedPDF from '../templates/UnifiedPDF';
+import LayoutPreservingPDF from '../templates/LayoutPreservingPDF';
 
-const LivePDFPreview = ({ resumeData, themeConfig, sectionOrder }) => {
-  // Create a stable key from themeConfig and sectionOrder to force re-render when they change
+const LivePDFPreview = ({ resumeData, themeConfig, sectionOrder, layoutSource, layoutConfig, visibleSections, customSectionDefs }) => {
+  // Create a stable key from themeConfig/layoutConfig and sectionOrder to force re-render when they change
   const previewKey = useMemo(() => {
     return JSON.stringify({
       theme: themeConfig || {},
+      layout: layoutConfig || {},
+      source: layoutSource || 'template',
       sections: sectionOrder || []
     });
-  }, [themeConfig, sectionOrder]);
+  }, [themeConfig, layoutConfig, layoutSource, sectionOrder]);
   
   // Memoize the PDF document to prevent unnecessary re-renders
   const pdfDocument = useMemo(() => {
     if (!resumeData?.personalInfo) return null;
+    if (layoutSource === 'uploaded') {
+      return (
+        <LayoutPreservingPDF
+          resumeData={resumeData}
+          layoutConfig={layoutConfig}
+          sectionOrder={sectionOrder}
+          visibleSections={visibleSections}
+          customSectionDefs={customSectionDefs}
+        />
+      );
+    }
     return (
       <UnifiedPDF 
         resumeData={resumeData} 
@@ -23,7 +37,7 @@ const LivePDFPreview = ({ resumeData, themeConfig, sectionOrder }) => {
         sectionFormats={resumeData.sectionFormats}
       />
     );
-  }, [resumeData, previewKey, sectionOrder]);
+  }, [resumeData, previewKey, sectionOrder, layoutSource, layoutConfig, visibleSections, customSectionDefs]);
 
   if (!resumeData?.personalInfo) {
     return (

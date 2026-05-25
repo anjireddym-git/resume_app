@@ -421,6 +421,7 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
 
   // Get current format for a section
   const getFormat = (sectionId) => {
+    if (sectionId === 'summary') return 'points';
     return sectionFormats[sectionId] || SECTION_FORMATS[sectionId]?.default || 'default';
   };
 
@@ -479,34 +480,20 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
         </div>
       </Section>
 
-      {/* Summary - Single field with auto-detect format */}
-      <Section title="Summary">
+      {/* Professional Summary - always bullet points */}
+      <Section title="Professional Summary">
         <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400">Format</span>
-            <FormatSelector
-              sectionId="summary"
-              currentFormat={getFormat('summary')}
-              onFormatChange={handleFormatChange}
-            />
-          </div>
           <CompactTextarea
             label=""
             value={data.summary}
             onChange={(v) => updateField('summary', v)}
-            placeholder={getFormat('summary') === 'points' 
-              ? "Enter each point on a new line:\nLed team of 5 engineers\nIncreased efficiency by 40%"
-              : "Brief professional summary..."
-            }
+            placeholder="Enter each point on a new line:\nLed team of 5 engineers\nIncreased efficiency by 40%"
             rows={4}
             enableAI={true}
             fieldType="summary"
           />
           <p className="text-xs text-neutral-400 italic">
-            {getFormat('summary') === 'points' 
-              ? 'Each line will be rendered as a bullet point' 
-              : 'Will be rendered as a paragraph'
-            }
+            Always rendered as bullet points. Use one point per line.
           </p>
         </div>
       </Section>

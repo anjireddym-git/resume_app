@@ -148,7 +148,7 @@ export const DEFAULT_SECTION_ORDER = [
 ];
 
 export const SECTION_LABELS = {
-  summary: 'Summary',
+  summary: 'Professional Summary',
   skills: 'Technical Skills',
   experience: 'Professional Experience',
   education: 'Education',

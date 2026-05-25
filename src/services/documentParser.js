@@ -29,7 +29,14 @@ function getMimeType(file) {
 import { functions, httpsCallable } from '../lib/firebase';
 
 /**
- * Use Cloud Functions to extract structured resume data from file
+ * Use Cloud Functions to extract structured resume data + layout from file.
+ *
+ * Returns `{ content, layout }` where:
+ *   - content = parsed resume JSON (personalInfo, experience, ...)
+ *   - layout  = partial layoutConfig describing the resume's visual layout
+ *
+ * The cloud function may return either the new wrapper `{ content, layout }`
+ * or a legacy bare resume object; both shapes are normalized here.
  */
 export async function extractResumeFromFile(geminiService, file) {
   const base64Data = await fileToBase64(file);
@@ -45,12 +52,20 @@ export async function extractResumeFromFile(geminiService, file) {
         model: 'gemini-2.5-pro',
       }
     });
-    
+
     if (!result.data?.success) {
       throw new Error(result.data?.error || 'Failed to extract resume data');
     }
-    
-    return result.data.data;
+
+    const payload = result.data.data;
+    // Normalize: support both new wrapper and legacy bare-resume shape.
+    if (payload && (payload.content || payload.layout)) {
+      return {
+        content: payload.content || {},
+        layout: payload.layout || {},
+      };
+    }
+    return { content: payload || {}, layout: {} };
   } catch (error) {
     console.error('Error extracting resume data:', error);
     if (error.code === 'functions/resource-exhausted') {
@@ -75,3 +90,34 @@ export async function extractResumeData(geminiService, rawText) {
   // This is now handled by extractResumeFromFile
   throw new Error('Use extractResumeFromFile instead');
 }
+
+// ============================================================================
+// NEW DOCX-NATIVE PIPELINE
+// ============================================================================
+
+/**
+ * Parse a .docx file into a field map suitable for the DOCX-native editor.
+ * Calls the `parseDocxToFieldMap` Cloud Function which classifies every
+ * paragraph and returns a structured field map keyed by stable XML node IDs.
+ *
+ * @param {File} file  Must be a .docx file.
+ * @returns {Promise<{ sections: Array, fields: Object, extractedText: string }>}
+ */
+export async function parseDocxToFieldMap(file) {
+  if (!file) throw new Error('No file provided');
+  const name = file.name.toLowerCase();
+  if (!name.endsWith('.docx')) {
+    throw new Error('Only .docx files are supported by the DOCX-native importer.');
+  }
+  const base64Data = await fileToBase64(file);
+  const callAI = httpsCallable(functions, 'callAI');
+  const result = await callAI({
+    action: 'parseDocxToFieldMap',
+    data: { base64Data },
+  });
+  if (!result.data?.success) {
+    throw new Error(result.data?.error || 'Failed to parse DOCX');
+  }
+  return result.data.data;
+}
+
