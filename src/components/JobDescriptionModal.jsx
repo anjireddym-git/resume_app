@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Loader2, Sparkles, CheckSquare, Square, Zap, FileText } from 'lucide-react';
+import AgentThinkingPane from './AgentThinkingPane';
 
 const FIELD_OPTIONS = [
   { id: 'headline', label: 'Professional Headline', description: 'Title shown below your name', default: true },
@@ -21,6 +22,7 @@ const JobDescriptionModal = ({
   isLoading,
   isAnalyzing,
   initialJobDescription = '',
+  agentStream = null,  // { active, thoughts[], answerPreview, usage, status, elapsedMs, validator, model, error }
 }) => {
   const [inputText, setInputText] = useState(initialJobDescription);
   const [mode, setMode] = useState('job'); // 'job' or 'transform'
@@ -61,10 +63,11 @@ const JobDescriptionModal = ({
 
   const selectedCount = Object.values(selectedFields).filter(Boolean).length;
   const isTransformMode = mode === 'transform';
+  const showAgentPane = !!agentStream?.active;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[95vh] sm:max-h-[90vh] overflow-hidden shadow-xl flex flex-col">
+      <div className={`bg-white rounded-2xl w-full ${showAgentPane ? 'max-w-4xl' : 'max-w-lg'} max-h-[95vh] sm:max-h-[90vh] overflow-hidden shadow-xl flex flex-col`}>
         {/* Header */}
         <div className="p-4 border-b border-neutral-200 flex items-center justify-between">
           <div>
@@ -87,7 +90,8 @@ const JobDescriptionModal = ({
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div className={`flex-1 overflow-hidden ${showAgentPane ? 'flex flex-col md:flex-row' : ''}`}>
+          <div className={`overflow-y-auto p-4 space-y-4 ${showAgentPane ? 'md:w-1/2 border-b md:border-b-0 md:border-r border-neutral-200' : 'flex-1'}`}>
           {/* Mode Toggle */}
           <div className="flex gap-2 p-1 bg-neutral-100 rounded-lg">
             <button
@@ -167,6 +171,21 @@ const JobDescriptionModal = ({
               ))}
             </div>
           </div>
+        </div>
+          {showAgentPane && (
+            <div className="md:w-1/2 p-4 min-h-[40vh] md:min-h-0 overflow-hidden">
+              <AgentThinkingPane
+                thoughts={agentStream.thoughts || []}
+                answerPreview={agentStream.answerPreview || ''}
+                usage={agentStream.usage}
+                status={agentStream.status || 'thinking'}
+                elapsedMs={agentStream.elapsedMs || 0}
+                validator={agentStream.validator}
+                model={agentStream.model || ''}
+                error={agentStream.error || ''}
+              />
+            </div>
+          )}
         </div>
 
         {/* Footer */}

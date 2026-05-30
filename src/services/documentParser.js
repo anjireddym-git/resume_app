@@ -29,14 +29,13 @@ function getMimeType(file) {
 import { functions, httpsCallable } from '../lib/firebase';
 
 /**
- * Use Cloud Functions to extract structured resume data + layout from file.
+ * Use Cloud Functions to extract structured resume data from a resume file.
  *
- * Returns `{ content, layout }` where:
- *   - content = parsed resume JSON (personalInfo, experience, ...)
- *   - layout  = partial layoutConfig describing the resume's visual layout
+ * Returns `{ content, layout }` where `layout` is always empty. The app uses
+ * its own templates/themes instead of preserving uploaded document formatting.
  *
- * The cloud function may return either the new wrapper `{ content, layout }`
- * or a legacy bare resume object; both shapes are normalized here.
+ * The cloud function may return either a bare resume object or the older
+ * `{ content, layout }` wrapper; both shapes are normalized here.
  */
 export async function extractResumeFromFile(geminiService, file) {
   const base64Data = await fileToBase64(file);
@@ -62,7 +61,7 @@ export async function extractResumeFromFile(geminiService, file) {
     if (payload && (payload.content || payload.layout)) {
       return {
         content: payload.content || {},
-        layout: payload.layout || {},
+        layout: {},
       };
     }
     return { content: payload || {}, layout: {} };
@@ -120,4 +119,3 @@ export async function parseDocxToFieldMap(file) {
   }
   return result.data.data;
 }
-

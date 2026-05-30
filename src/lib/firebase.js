@@ -27,6 +27,21 @@ googleProvider.setCustomParameters({
   prompt: 'select_account'
 });
 
+// Google Drive + Docs API scopes (for Drive-backed resume sync)
+// drive.file: per-app file access (only files we create / user explicitly opens)
+// documents:  Docs API edit access for those files
+export const GOOGLE_DRIVE_SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/documents',
+];
+GOOGLE_DRIVE_SCOPES.forEach((scope) => googleProvider.addScope(scope));
+
+// Gmail scopes used by the "Tailor & Send" flow. These are requested
+// incrementally (lazily) — only when the user opts in to the email features —
+// via AuthContext.requestGmailSendAccess() / requestGmailReadAccess().
+export const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
+export const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+
 // Firestore
 export const db = getFirestore(app);
 
@@ -43,8 +58,9 @@ if (typeof window !== 'undefined') {
   analytics = getAnalytics(app);
 }
 
-// Connect to Functions emulator in development
-if (import.meta.env.DEV) {
+// Connect to Functions emulator only when explicitly requested. By default,
+// local development uses the deployed Firebase backend.
+if (import.meta.env.DEV && import.meta.env.VITE_USE_FUNCTIONS_EMULATOR === 'true') {
   connectFunctionsEmulator(functions, '127.0.0.1', 5001);
 }
 
@@ -55,4 +71,3 @@ export { httpsCallable };
 export { analytics, logEvent, setUserId, setUserProperties };
 
 export default app;
-

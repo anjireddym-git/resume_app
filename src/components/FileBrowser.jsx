@@ -15,7 +15,8 @@ import {
   Database,
   Sparkles,
   Palette,
-  Star
+  Star,
+  Cloud
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { 
@@ -398,6 +399,9 @@ const FileBrowser = ({
               )}
               {resume.starred && (
                 <Star className="w-3 h-3 text-amber-400 fill-amber-400 flex-shrink-0" />
+              )}
+              {resume.driveFileId && (
+                <Cloud className="w-3 h-3 text-blue-500 flex-shrink-0" title="Synced to Google Drive" />
               )}
               {isGenerated && (
                 <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 flex-shrink-0">

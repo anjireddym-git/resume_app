@@ -213,13 +213,15 @@ The emulator reads:
 
 ### 5.3 Connect frontend to emulator
 
-`src/lib/firebase.js` already has this enabled via `import.meta.env.DEV`:
+`src/lib/firebase.js` connects to the Functions emulator only when explicitly enabled:
 
 ```js
-if (import.meta.env.DEV) {
+if (import.meta.env.DEV && import.meta.env.VITE_USE_FUNCTIONS_EMULATOR === 'true') {
   connectFunctionsEmulator(functions, '127.0.0.1', 5001);
 }
 ```
+
+Set `VITE_USE_FUNCTIONS_EMULATOR=true` in `.env.local` to use the local emulator. Leave it unset or set it to `false` to point localhost at deployed Firebase Functions.
 
 ### 5.4 Start the frontend dev server
 
@@ -227,7 +229,7 @@ if (import.meta.env.DEV) {
 npm run dev
 ```
 
-App runs at `http://localhost:3000/` and calls the local emulator.
+App runs at `http://localhost:3000/`. With `VITE_USE_FUNCTIONS_EMULATOR=true`, it calls the local emulator; otherwise it calls deployed Firebase Functions.
 
 > **Note:** Auth and Firestore still hit production in this setup. Only Functions are emulated. To also emulate Auth/Firestore, run: `firebase emulators:start --only functions,firestore,auth`
 

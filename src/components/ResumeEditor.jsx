@@ -511,7 +511,7 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
           </div>
           <div className="border border-neutral-200 rounded-lg bg-white overflow-hidden">
             <div className="px-3 py-2 bg-neutral-50 border-b border-neutral-200 flex items-center justify-between">
-              <span className="text-xs text-neutral-500">Click skills to edit</span>
+              <span className="text-xs text-neutral-500">Use arrows to reorder categories; edit skills in display order</span>
               <button
                 onClick={() => {
                   const currentSkills = data.skills || {};

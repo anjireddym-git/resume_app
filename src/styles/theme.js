@@ -59,23 +59,25 @@ export const spacing = {
   }
 };
 
-// Tailwind class mappings for web components
+// Tailwind class mappings for web components — Google Docs–native style
 export const webClasses = {
   text: {
-    primary: 'text-gray-800',
-    secondary: 'text-gray-600',
-    muted: 'text-gray-500',
-    light: 'text-gray-400',
+    primary: 'text-black',
+    secondary: 'text-neutral-700',
+    muted: 'text-neutral-600',
+    light: 'text-neutral-500',
   },
   accent: {
-    primary: 'text-blue-600',
-    success: 'text-emerald-600',
+    primary: 'text-[#1155CC]',
+    success: 'text-emerald-700',
   },
-  sectionTitle: 'text-xs font-bold text-gray-600 uppercase tracking-widest mb-2 pb-1 border-b-2 border-gray-200',
-  name: 'text-3xl font-semibold text-gray-800 tracking-tight',
-  jobTitle: 'font-semibold text-gray-800',
-  body: 'text-sm text-gray-900',
-  small: 'text-xs text-gray-700',
+  // Section title: Docs-style — 12pt black uppercase, light underline
+  sectionTitle: 'text-[12pt] font-bold text-black uppercase tracking-[0.04em] mb-1.5 pb-0.5 border-b border-neutral-800',
+  // Candidate name: Docs Heading 1 (20pt)
+  name: 'text-[20pt] font-bold text-black leading-tight',
+  jobTitle: 'font-bold text-black',
+  body: 'text-[11pt] text-black',
+  small: 'text-[10pt] text-neutral-700',
 };
 
 // @react-pdf/renderer StyleSheet format

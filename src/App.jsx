@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { FileText, RefreshCw, LogOut, User, ChevronDown, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X, Eye } from 'lucide-react';
+import { FileText, RefreshCw, LogOut, User, ChevronDown, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
 import { CreditsProvider, useCredits } from './contexts/CreditsContext';
 import LoginPage from './pages/LoginPage';
@@ -9,10 +9,14 @@ import CreateResumeModal from './components/CreateResumeModal';
 import EditSharedModal from './components/EditSharedModal';
 import AutoPopulateModal from './components/AutoPopulateModal';
 import JobDescriptionModal from './components/JobDescriptionModal';
+import OutreachWorkspace from './components/outreach';
+import useOutreachCounts from './hooks/useOutreachCounts';
 import VersionHistory from './components/VersionHistory';
 import ResumeEditor from './components/ResumeEditor';
-import LivePDFPreview from './components/LivePDFPreview';
-import LayoutPreservingTemplate from './templates/LayoutPreservingTemplate';
+import ClassicTemplate from './templates/ClassicTemplate';
+import GoogleDocsPreview from './components/GoogleDocsPreview';
+import DriveAccessGate from './components/DriveAccessGate';
+import SyncStatusBadge from './components/SyncStatusBadge';
 import SectionReorder from './components/SectionReorder';
 import MatchAnalysis from './components/MatchAnalysis';
 import ActionButtons from './components/ActionButtons';
@@ -23,7 +27,8 @@ import CreditsDisplay from './components/CreditsDisplay';
 import ResizableSplitPane from './components/ResizableSplitPane';
 import { geminiService } from './services/geminiService';
 import { analyticsService } from './services/analyticsService';
-import { TEMPLATES, DEFAULT_SECTION_ORDER } from './config/templates';
+import { DEFAULT_SECTION_ORDER } from './config/templates';
+import { normalizeSummaryToPoints } from './lib/summaryUtils';
 import { 
   getResumeGroup, 
   getResume, 
@@ -38,17 +43,49 @@ import {
   updateGroupSectionLayout
 } from './services/resumeService';
 import useResumeEditor from './hooks/useResumeEditor';
+import { syncResumeToDriveByIds } from './services/driveSyncService';
 
 const INITIAL_RESUME_DATA = {};
 
+const OutreachTabs = ({ view, setView }) => {
+  const { total } = useOutreachCounts();
+  return (
+    <div className="hidden sm:flex items-center gap-1 ml-3 pl-3 border-l border-neutral-200">
+      <button
+        onClick={() => setView('editor')}
+        className={`h-7 px-3 rounded-md text-sm font-medium transition-colors ${
+          view === 'editor' ? 'bg-neutral-100 text-neutral-900' : 'text-neutral-600 hover:bg-neutral-50'
+        }`}
+      >
+        Editor
+      </button>
+      <button
+        onClick={() => setView('outreach')}
+        className={`h-7 px-3 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 ${
+          view === 'outreach' ? 'bg-blue-50 text-blue-700' : 'text-neutral-600 hover:bg-neutral-50'
+        }`}
+      >
+        Outreach
+        {total > 0 && (
+          <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-semibold flex items-center justify-center">
+            {total}
+          </span>
+        )}
+      </button>
+    </div>
+  );
+};
+
 function App() {
-  const { user, isAuthenticated, loading: authLoading, signOut, updatePreferences } = useAuth();
+  const { user, isAuthenticated, loading: authLoading, signOut, updatePreferences, getGoogleAccessToken, hasGoogleDriveAccess } = useAuth();
   const { credits, hasCredits, purchaseCredits } = useCredits();
   
   const [showSplash, setShowSplash] = useState(true);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showCreateResume, setShowCreateResume] = useState(false);
   const [showJobModal, setShowJobModal] = useState(false);
+  const [agentStream, setAgentStream] = useState(null); // null | { active, thoughts[], answerPreview, usage, status, elapsedMs, validator, model, error }
+  const [view, setView] = useState('editor'); // 'editor' | 'outreach'
   const [showVersionHistory, setShowVersionHistory] = useState(false);
   const [createResumeGroupId, setCreateResumeGroupId] = useState(null);
   const [showEditShared, setShowEditShared] = useState(false);
@@ -58,7 +95,6 @@ function App() {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [showMobilePDFPreview, setShowMobilePDFPreview] = useState(false);
   
   // Theme Design Modal State
   const [showDesignModal, setShowDesignModal] = useState(false);
@@ -87,11 +123,14 @@ function App() {
   const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(null);
 
+  const [showLayoutPanel, setShowLayoutPanel] = useState(false);
+  // Drive sync status: idle | syncing | synced | error | auth-error
+  const [syncStatus, setSyncStatus] = useState('idle');
+
   // Template & layout state
   const [selectedTemplate, setSelectedTemplate] = useState('classic');
   const [sectionOrder, setSectionOrder] = useState(DEFAULT_SECTION_ORDER);
   const [visibleSections, setVisibleSections] = useState(DEFAULT_SECTION_ORDER);
-  const [showLayoutPanel, setShowLayoutPanel] = useState(false);
 
   const resumeRef = useRef(null);
   const resumeDataRef = useRef({}); // Keep track of latest resume data
@@ -298,55 +337,130 @@ function App() {
     analyticsService.trackAIOptimizeStart(fieldsToUpdate, mode);
     const previousScore = matchAnalysis?.matchScore || 0;
     
-    setShowJobModal(false);
+    // Keep modal open during streaming so the thinking pane is visible.
     setIsLoading(true);
     setIsAnalyzing(true);
     setError('');
+    setAgentStream({
+      active: true,
+      thoughts: [],
+      answerPreview: '',
+      usage: null,
+      status: 'thinking',
+      elapsedMs: 0,
+      validator: null,
+      model: '',
+      error: '',
+    });
+    const startedAt = Date.now();
+    const elapsedTimer = setInterval(() => {
+      setAgentStream((s) => (s ? { ...s, elapsedMs: Date.now() - startedAt } : s));
+    }, 250);
     
     try {
-      console.log(`[AI Update] ${mode === 'transform' ? 'Transform' : 'Optimize'} mode, calling AI service...`);
-      console.log('[AI Update] Current resume data being sent:', JSON.stringify(resumeData, null, 2));
-      
-      // Call appropriate service method based on mode
-      const updatedResume = mode === 'transform'
-        ? await geminiService.transformResumeForRole(resumeData, inputText, fieldsToUpdate)
-        : await geminiService.updateResumeForJob(resumeData, inputText, fieldsToUpdate);
-      
-      console.log('[AI Update] AI response received:', JSON.stringify(updatedResume, null, 2));
-      
-      // Validate the response
+      console.log(`[AI Update] ${mode === 'transform' ? 'Transform' : 'Optimize'} mode via streaming agent...`);
+
+      const final = await geminiService.streamResumeAgent(
+        resumeData,
+        inputText,
+        fieldsToUpdate,
+        (chunk) => {
+          setAgentStream((s) => {
+            if (!s) return s;
+            switch (chunk.type) {
+              case 'status':
+                return { ...s, status: chunk.stage || s.status, model: chunk.model || s.model };
+              case 'thought':
+                return { ...s, thoughts: [...s.thoughts, chunk.text || ''], status: 'thinking' };
+              case 'answer':
+                return { ...s, answerPreview: (s.answerPreview || '') + (chunk.text || ''), status: 'writing' };
+              case 'usage':
+                return { ...s, usage: chunk };
+              case 'validator':
+                return { ...s, validator: { ok: chunk.ok, issues: chunk.issues || [] }, status: 'validating' };
+              case 'persisted':
+                return { ...s, status: 'persisting' };
+              case 'error':
+                return { ...s, error: chunk.message || 'Agent error', status: 'error' };
+              default:
+                return s;
+            }
+          });
+        },
+        {
+          sourceResumeId: currentResume.id,
+          mode,
+          label: mode === 'transform'
+            ? `Transformed for ${inputText.substring(0, 50)}...`
+            : `Optimized for ${fieldsToUpdate.join(', ')}`,
+        }
+      );
+
+      const updatedResume = final?.resume;
       if (!updatedResume) {
-        throw new Error('AI returned empty response');
+        throw new Error(final?.error || 'AI returned empty response');
       }
 
+      const validatorOk = final?.validator?.ok !== false;
+
       setJobDescription(inputText);
-      
-      // Track AI optimization success (without match score for now)
+      setAgentStream((s) => (s ? {
+        ...s,
+        status: validatorOk ? 'done' : 'review-required',
+        validator: final?.validator || s.validator,
+        elapsedMs: Date.now() - startedAt,
+      } : s));
+
+      // Track AI optimization success
       analyticsService.trackAIOptimizeSuccess(previousScore, 0, mode);
       analyticsService.trackCreditsUsed(mode === 'transform' ? 'ai_transform' : 'ai_optimize', 1);
 
-      // AI outputs are now forked into a new child resume so the source resume
-      // remains unchanged and generated variants can be browsed separately.
       console.log('[AI Update] Creating generated child resume...');
-      const newResumeId = await createGeneratedResume(user.uid, currentResume, updatedResume, {
-        mode,
-        jobDescription: inputText,
-        fieldsToUpdate,
-        label: mode === 'transform'
-          ? `Transformed for ${inputText.substring(0, 50)}...`
-          : `Optimized for ${fieldsToUpdate.join(', ')}`,
-      });
+      // Prefer the server-persisted resume ID (Cloud Function already wrote
+      // the doc when validator.ok). Otherwise fall back to client save.
+      let newResumeId = final?.newResumeId || null;
+      if (!newResumeId) {
+        console.warn('[AI Update] Server did not persist; falling back to client save.');
+        newResumeId = await createGeneratedResume(user.uid, currentResume, updatedResume, {
+          mode,
+          jobDescription: inputText,
+          fieldsToUpdate,
+          label: mode === 'transform'
+            ? `Transformed for ${inputText.substring(0, 50)}...`
+            : `Optimized for ${fieldsToUpdate.join(', ')}`,
+          aiTrace: {
+            thoughts: (final?.aiTrace?.thoughts) || '',
+            usage: final?.usage || null,
+            model: final?.aiTrace?.model || '',
+            validator: final?.validator || null,
+            savedAt: new Date().toISOString(),
+          },
+          aiMetadata: final?.metadata || null,
+        });
+      }
 
       setRefreshTrigger(prev => prev + 1);
       setHasUnsavedChanges(false);
       setSelectedGroupId(currentResume.groupId);
       setSelectedResumeId(newResumeId);
-      setResumeData(updatedResume);
+      setResumeData({
+        ...updatedResume,
+        summary: normalizeSummaryToPoints(updatedResume.summary || ''),
+      });
       await updatePreferences({
         currentGroupId: currentResume.groupId,
         currentResumeId: newResumeId,
       });
       console.log('[AI Update] Generated child resume created:', newResumeId);
+
+      // Auto-close on clean success; leave open on validator soft-fail so the
+      // user can review the issues panel before dismissing.
+      if (validatorOk) {
+        setTimeout(() => {
+          setAgentStream(null);
+          setShowJobModal(false);
+        }, 800);
+      }
     } catch (err) {
       console.error('[AI Update] ERROR:', err);
       console.error('[AI Update] Error details:', {
@@ -355,9 +469,10 @@ function App() {
         name: err.name
       });
       setError(err.message || 'Failed to optimize resume.');
-      // Track AI optimization error
+      setAgentStream((s) => (s ? { ...s, status: 'error', error: err.message || 'Failed' } : s));
       analyticsService.trackAIOptimizeError(err.message, mode);
     } finally {
+      clearInterval(elapsedTimer);
       setIsLoading(false);
       setIsAnalyzing(false);
     }
@@ -394,6 +509,60 @@ function App() {
   };
 
   // Save all changes to Firebase
+  /**
+   * Sync the current resume to Google Drive in the background. Creates the
+   * Google Doc on first call, updates it on subsequent calls. Failures are
+   * logged and reflected in syncStatus; never blocks the user.
+   */
+  const autoSyncToDrive = useCallback(async (latestData) => {
+    if (!currentResume || !currentGroup) return;
+    setSyncStatus('syncing');
+    try {
+      const result = await syncResumeToDriveByIds({
+        getAccessToken: getGoogleAccessToken,
+        groupId: currentGroup.id,
+        resume: currentResume,
+        resumeData: latestData || resumeDataRef.current,
+        sectionOrder: sectionOrder.filter((s) => visibleSections.includes(s)),
+      });
+      setCurrentResume((prev) => prev ? {
+        ...prev,
+        driveFileId: result.fileId,
+        driveFolderId: result.folderId,
+        driveWebViewLink: result.webViewLink,
+      } : prev);
+      setSyncStatus('synced');
+    } catch (err) {
+      if (err?.status === 401 || err?.status === 403) {
+        console.warn('Drive auto-sync needs reconnection');
+        setSyncStatus('auth-error');
+      } else {
+        console.error('Drive auto-sync failed:', err);
+        setSyncStatus('error');
+      }
+    }
+  }, [currentResume, currentGroup, getGoogleAccessToken, sectionOrder, visibleSections]);
+
+  // Auto-sync resume to Drive whenever a new resume is opened that isn't yet
+  // backed by a Google Doc. Must be after autoSyncToDrive definition.
+  // Gated on hasGoogleDriveAccess so we don't trigger 401s + a noisy
+  // "Reconnect needed" badge for users who haven't granted Drive scope.
+  const autoSyncedRef = useRef(new Set());
+  useEffect(() => {
+    if (!currentResume?.id || !currentGroup?.id) return;
+    if (currentResume.driveFileId) {
+      setSyncStatus('synced');
+      return;
+    }
+    if (!hasGoogleDriveAccess) {
+      setSyncStatus('idle');
+      return;
+    }
+    if (autoSyncedRef.current.has(currentResume.id)) return;
+    autoSyncedRef.current.add(currentResume.id);
+    autoSyncToDrive(resumeDataRef.current);
+  }, [currentResume?.id, currentGroup?.id, currentResume?.driveFileId, hasGoogleDriveAccess, autoSyncToDrive]);
+
   const handleSave = async () => {
     if (!currentResume || !hasUnsavedChanges) return;
     
@@ -424,6 +593,9 @@ function App() {
       // Track resume save
       analyticsService.trackResumeSave(currentResume.id, true);
       console.log('Save successful');
+
+      // Always auto-sync to Drive after save (gate already ensures token exists)
+      autoSyncToDrive(dataToSave).catch((e) => console.warn('Auto-sync failed:', e));
     } catch (err) {
       console.error('Failed to save:', err);
       setError('Failed to save changes');
@@ -583,6 +755,11 @@ function App() {
     return <LoginPage />;
   }
 
+  // Gate: require Google Drive access before letting user into the dashboard
+  if (!hasGoogleDriveAccess) {
+    return <DriveAccessGate />;
+  }
+
   return (
     <div className="min-h-screen bg-[#fafafa] flex flex-col">
       {/* Header */}
@@ -597,6 +774,7 @@ function App() {
           </button>
           <FileText className="w-5 h-5 text-neutral-900" strokeWidth={1.5} />
           <span className="font-medium text-neutral-900">Resume</span>
+          <OutreachTabs view={view} setView={setView} />
         </div>
 
         <div className="flex items-center gap-3">
@@ -654,6 +832,16 @@ function App() {
       )}
 
       {/* Main Content */}
+      {view === 'outreach' ? (
+        <OutreachWorkspace
+          user={user}
+          onResumeCreated={(newId, groupId) => {
+            if (groupId) setSelectedGroupId(groupId);
+            if (newId) setSelectedResumeId(newId);
+            setRefreshTrigger((p) => p + 1);
+          }}
+        />
+      ) : (
       <div className="flex-1 flex overflow-hidden relative">
         {/* Mobile Sidebar Overlay */}
         {sidebarOpen && (
@@ -770,27 +958,14 @@ function App() {
                       </button>
                     )}
 
-                    {/* Template Selector */}
-                    <select
-                      value={selectedTemplate}
-                      onChange={(e) => setSelectedTemplate(e.target.value)}
-                      className="h-9 px-2 md:px-3 border border-neutral-200 rounded-lg text-sm text-neutral-700 bg-white"
-                    >
-                      {Object.values(TEMPLATES).map(t => (
-                        <option key={t.id} value={t.id}>{t.name}</option>
-                      ))}
-                    </select>
+                    {/* Template Selector removed — PDF support removed */}
 
                     <ActionButtons
                       resumeRef={resumeRef}
                       resumeData={resumeData}
-                      themeConfig={currentGroup?.themeConfig}
                       sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
                       hasChanges={hasUnsavedChanges}
-                      layoutSource={currentGroup?.layoutSource}
-                      layoutConfig={currentGroup?.layoutConfig}
-                      visibleSections={visibleSections}
-                      customSectionDefs={currentGroup?.customSectionDefs}
+                      currentResume={currentResume}
                     />
                   </div>
                 </div>
@@ -877,38 +1052,22 @@ function App() {
                         </div>
                       }
                       right={
-                        <div className="flex-1 flex flex-col bg-neutral-800 p-4">
-                          <div className="text-xs text-neutral-400 mb-2 flex items-center justify-between">
-                            <span>{currentGroup?.layoutSource === 'uploaded' ? 'Live Inline Editor' : 'PDF Preview'}</span>
-                            <span className="text-neutral-500">{currentGroup?.layoutSource === 'uploaded' ? 'Original layout' : TEMPLATES[selectedTemplate]?.name}</span>
+                        <div className="flex-1 flex flex-col bg-neutral-100 p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-xs text-neutral-400">Live Preview</div>
+                            <SyncStatusBadge status={syncStatus} />
                           </div>
-                          <div className="flex-1 rounded-lg overflow-auto bg-neutral-200 flex items-start justify-center p-4">
-                            {currentGroup?.layoutSource === 'uploaded' ? (
-                              <div className="shadow-2xl bg-white">
-                                <LayoutPreservingTemplate
-                                  resumeData={resumeData}
-                                  layoutConfig={currentGroup?.layoutConfig}
-                                  sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
-                                  visibleSections={visibleSections}
-                                  customSectionDefs={currentGroup?.customSectionDefs}
-                                  isEditMode={true}
-                                  onUpdate={(path, val) => { handleFieldUpdate(path, val); }}
-                                  onListAdd={(path) => { addItem(path, ''); setHasUnsavedChanges(true); }}
-                                  onListRemove={(path, index) => { removeItem(path, index); setHasUnsavedChanges(true); }}
-                                />
-                              </div>
+                          <div className="flex-1 overflow-auto bg-white rounded-lg shadow-sm border border-neutral-200">
+                            {currentResume?.driveFileId ? (
+                              <GoogleDocsPreview
+                                fileId={currentResume.driveFileId}
+                                mode="preview"
+                              />
                             ) : (
-                              <div className="w-full h-full">
-                                <LivePDFPreview
-                                  resumeData={resumeData}
-                                  themeConfig={currentGroup?.themeConfig}
-                                  sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
-                                  layoutSource={currentGroup?.layoutSource}
-                                  layoutConfig={currentGroup?.layoutConfig}
-                                  visibleSections={visibleSections}
-                                  customSectionDefs={currentGroup?.customSectionDefs}
-                                />
-                              </div>
+                              <ClassicTemplate
+                                resumeData={resumeData}
+                                isEditMode={false}
+                              />
                             )}
                           </div>
                         </div>
@@ -926,15 +1085,6 @@ function App() {
                   </div>
                 </div>
               </div>
-
-              {/* Mobile PDF Preview Button (FAB) */}
-              <button
-                onClick={() => setShowMobilePDFPreview(true)}
-                className="lg:hidden fixed bottom-6 right-6 z-30 w-14 h-14 bg-neutral-900 text-white rounded-full shadow-lg flex items-center justify-center hover:bg-neutral-800 transition-colors safe-area-bottom"
-                title="Preview PDF"
-              >
-                <Eye className="w-6 h-6" />
-              </button>
             </>
           ) : (
             /* Empty State */
@@ -956,6 +1106,7 @@ function App() {
           )}
         </div>
       </div>
+      )}
 
       {/* Modals */}
       <CreateGroupModal
@@ -996,12 +1147,13 @@ function App() {
 
       <JobDescriptionModal
         isOpen={showJobModal}
-        onClose={() => setShowJobModal(false)}
+        onClose={() => { setShowJobModal(false); setAgentStream(null); }}
         onOptimize={handleUpdateWithAI}
         onCheckMatch={handleCheckMatch}
         isLoading={isLoading}
         isAnalyzing={isAnalyzing}
         initialJobDescription={jobDescription}
+        agentStream={agentStream}
       />
 
       {/* Version History Modal */}
@@ -1018,39 +1170,6 @@ function App() {
           }
         }}
       />
-
-      {/* Mobile PDF Preview Modal */}
-      {showMobilePDFPreview && (
-        <div className="fixed inset-0 bg-neutral-800 z-50 flex flex-col lg:hidden">
-          {/* Modal Header */}
-          <div className="h-14 bg-neutral-900 flex items-center justify-between px-4 flex-shrink-0">
-            <div className="flex items-center gap-2">
-              <FileText className="w-5 h-5 text-white" />
-              <span className="text-white font-medium">PDF Preview</span>
-              <span className="text-neutral-400 text-sm">• {TEMPLATES[selectedTemplate]?.name}</span>
-            </div>
-            <button
-              onClick={() => setShowMobilePDFPreview(false)}
-              className="p-2 text-neutral-400 hover:text-white rounded-lg"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-          
-          {/* PDF Content */}
-          <div className="flex-1 overflow-auto p-4">
-            <LivePDFPreview
-              resumeData={resumeData}
-              themeConfig={currentGroup?.themeConfig}
-              sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
-              layoutSource={currentGroup?.layoutSource}
-              layoutConfig={currentGroup?.layoutConfig}
-              visibleSections={visibleSections}
-              customSectionDefs={currentGroup?.customSectionDefs}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Unsaved Changes Warning Modal */}
       {showUnsavedWarning && (

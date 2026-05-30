@@ -1,16 +1,14 @@
 import React, { useState, useRef } from 'react';
-import { X, Upload, Loader2, FileText, ArrowLeft, ArrowRight, Check, Layout } from 'lucide-react';
+import { X, Upload, Loader2, FileText, ArrowLeft, ArrowRight, Check } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { createResumeGroup, createResume } from '../services/resumeService';
 import { extractResumeFromFile } from '../services/documentParser';
 import { geminiService } from '../services/geminiService';
 import ThemeEditor from './ThemeEditor';
-import UnifiedPDF from '../templates/UnifiedPDF';
-import LayoutPreservingTemplate from '../templates/LayoutPreservingTemplate';
-import LayoutConfirmationModal from './LayoutConfirmationModal';
-import { PDFViewer } from '@react-pdf/renderer';
+import ClassicTemplate from '../templates/ClassicTemplate';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
-import { buildLayoutConfig, buildSectionOrder, buildCustomSectionDefs, buildCustomSectionsMap } from '../services/layoutExtractionService';
+import { buildSectionOrder, buildCustomSectionDefs, buildCustomSectionsMap } from '../services/layoutExtractionService';
+import { normalizeSummaryToPoints } from '../lib/summaryUtils';
 
 const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
   const { user } = useAuth();
@@ -22,10 +20,6 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
   // Form data
   const [groupName, setGroupName] = useState('');
   const [resumeData, setResumeData] = useState(null);
-  const [detectedLayout, setDetectedLayout] = useState(null); // partial layoutConfig from AI/DOCX
-  const [confirmedLayout, setConfirmedLayout] = useState(null); // user-confirmed layoutConfig
-  const [layoutSource, setLayoutSource] = useState('template'); // 'template' | 'uploaded'
-  const [showLayoutModal, setShowLayoutModal] = useState(false);
   const [themeConfig, setThemeConfig] = useState(DEFAULT_THEME_CONFIG);
   const [error, setError] = useState('');
 
@@ -36,13 +30,15 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
     setIsImporting(true);
     setError('');
     try {
-      const { content, layout } = await extractResumeFromFile(geminiService, file);
-      console.log('Resume import response:', { contentKeys: Object.keys(content || {}), layoutKeys: Object.keys(layout || {}) });
+      const { content } = await extractResumeFromFile(geminiService, file);
+      console.log('Resume import response:', { contentKeys: Object.keys(content || {}) });
       if (!content || (!content.personalInfo && !content.experience && !content.summary)) {
         throw new Error('AI returned empty resume content. Try a different file or model.');
       }
-      setResumeData(content);
-      setDetectedLayout(layout || {});
+      setResumeData({
+        ...content,
+        summary: normalizeSummaryToPoints(content.summary || ''),
+      });
     } catch (err) {
       console.error('Import failed:', err);
       setError(err?.message || 'Failed to import resume. Please try again.');
@@ -52,16 +48,12 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
     }
   };
 
-  const handleCompleteWithLayout = (overrideLayout) => handleComplete({ layoutConfig: overrideLayout, layoutSource: 'uploaded' });
-
-  const handleComplete = async (overrides = {}) => {
+  const handleComplete = async () => {
     if (!resumeData) {
       setError('Please import a resume first');
       return;
     }
 
-    const finalLayoutConfig = overrides.layoutConfig ?? confirmedLayout;
-    const finalLayoutSource = overrides.layoutSource ?? layoutSource;
     setStep('creating');
     setIsLoading(true);
     try {
@@ -81,17 +73,16 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
       // Custom sections (Phase 1)
       const customSectionDefs = buildCustomSectionDefs(resumeData);
       const customSectionsMap = buildCustomSectionsMap(resumeData);
-      const sectionOrder = buildSectionOrder(resumeData, finalLayoutConfig);
+      const sectionOrder = buildSectionOrder(resumeData);
 
-      // Create group with shared data + (optional) layoutConfig
+      // Create group with extracted content; visual styling always comes from the app theme/template.
       const groupId = await createResumeGroup(user.uid, {
         name: groupName,
         personalInfo: sharedData.personalInfo,
         experience: sharedData.experience,
         education: sharedData.education,
         themeConfig: themeConfig,
-        layoutSource: finalLayoutSource,
-        layoutConfig: finalLayoutConfig || undefined,
+        layoutSource: 'template',
         customSectionDefs,
         sectionOrder,
         visibleSections: sectionOrder,
@@ -128,10 +119,6 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
     setStep('name');
     setGroupName('');
     setResumeData(null);
-    setDetectedLayout(null);
-    setConfirmedLayout(null);
-    setLayoutSource('template');
-    setShowLayoutModal(false);
     setThemeConfig(DEFAULT_THEME_CONFIG);
     setError('');
     onClose();
@@ -262,21 +249,12 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
                 >
                   <ArrowLeft className="w-4 h-4" /> Back
                 </button>
-                {detectedLayout ? (
-                  <button
-                    onClick={() => setShowLayoutModal(true)}
-                    disabled={!resumeData}
-                    className="flex-1 h-10 border border-neutral-900 text-neutral-900 rounded-lg text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-2 hover:bg-neutral-50"
-                  >
-                    <Layout className="w-4 h-4" /> Keep original layout
-                  </button>
-                ) : null}
                 <button
-                  onClick={() => { setLayoutSource('template'); setConfirmedLayout(null); setStep('design'); }}
+                  onClick={() => setStep('design')}
                   disabled={!resumeData}
                   className="flex-1 h-10 bg-neutral-900 text-white rounded-lg text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-2"
                 >
-                  Use template <ArrowRight className="w-4 h-4" />
+                  Customize design <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
@@ -292,13 +270,8 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
                 </div>
                 
                 {/* Preview Pane */}
-                <div className="flex-1 bg-neutral-100 rounded-lg overflow-hidden border border-neutral-200">
-                  <PDFViewer width="100%" height="100%" className="border-0">
-                    <UnifiedPDF 
-                      resumeData={resumeData}
-                      themeConfig={themeConfig}
-                    />
-                  </PDFViewer>
+                <div className="flex-1 bg-neutral-100 rounded-lg overflow-auto border border-neutral-200">
+                  <ClassicTemplate resumeData={resumeData} isEditMode={false} />
                 </div>
               </div>
 
@@ -330,25 +303,8 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
         </div>
       </div>
 
-      {/* Layout confirmation modal (overlay) */}
-      <LayoutConfirmationModal
-        isOpen={showLayoutModal}
-        onClose={() => setShowLayoutModal(false)}
-        detectedLayout={detectedLayout}
-        resumeContent={resumeData}
-        customSectionDefs={buildCustomSectionDefs(resumeData || {})}
-        sectionOrder={buildSectionOrder(resumeData || {}, detectedLayout)}
-        onConfirm={(finalCfg) => {
-          setConfirmedLayout(finalCfg);
-          setLayoutSource('uploaded');
-          setShowLayoutModal(false);
-          // Skip design step when using preserved layout — go straight to create
-          handleCompleteWithLayout(finalCfg);
-        }}
-      />
     </div>
   );
 };
 
 export default CreateGroupModal;
-

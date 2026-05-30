@@ -1,52 +1,30 @@
 import React, { useState, useEffect } from 'react';
-import { X, Check, Loader2, ArrowLeft, RotateCcw, Layout, FileText } from 'lucide-react';
-import { PDFViewer } from '@react-pdf/renderer';
+import { Check, Loader2, ArrowLeft, RotateCcw } from 'lucide-react';
 import ThemeEditor from './ThemeEditor';
-import UnifiedPDF from '../templates/UnifiedPDF';
-import LayoutPreservingPDF from '../templates/LayoutPreservingPDF';
-import LayoutConfirmationModal from './LayoutConfirmationModal';
-import { updateGroupTheme, getResumeGroup, setLayoutSource as svcSetLayoutSource, saveLayoutConfig } from '../services/resumeService';
+import ClassicTemplate from '../templates/ClassicTemplate';
+import { updateGroupTheme } from '../services/resumeService';
 import { analyticsService } from '../services/analyticsService';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 
 const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate }) => {
   const [themeConfig, setThemeConfig] = useState(DEFAULT_THEME_CONFIG);
-  const [layoutSource, setLayoutSourceState] = useState('template');
-  const [layoutConfig, setLayoutConfigState] = useState(null);
-  const [showLayoutEditor, setShowLayoutEditor] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [loading, setLoading] = useState(false);
 
-  // Initialize theme + layout from group data
   useEffect(() => {
     if (isOpen && group) {
       setThemeConfig(group.themeConfig || DEFAULT_THEME_CONFIG);
-      setLayoutSourceState(group.layoutSource || 'template');
-      setLayoutConfigState(group.layoutConfig || null);
     }
   }, [isOpen, group]);
 
   const handleSave = async () => {
     if (!group?.id) return;
-    
     setIsSaving(true);
     try {
       await updateGroupTheme(group.id, themeConfig);
-      await svcSetLayoutSource(group.id, layoutSource);
-      if (layoutSource === 'uploaded' && layoutConfig) {
-        await saveLayoutConfig(group.id, layoutConfig, 'uploaded');
-      }
-      
-      // Track theme customization
       analyticsService.trackThemeChange(themeConfig.preset || 'custom');
-      if (themeConfig.colors?.primary) {
-        analyticsService.trackColorChange('primary', themeConfig.colors.primary);
-      }
-      if (themeConfig.fonts?.heading) {
-        analyticsService.trackFontChange('heading', themeConfig.fonts.heading);
-      }
-      
-      if (onUpdate) onUpdate(); // Signal refresh
+      if (themeConfig.colors?.primary) analyticsService.trackColorChange('primary', themeConfig.colors.primary);
+      if (themeConfig.fonts?.heading) analyticsService.trackFontChange('heading', themeConfig.fonts.heading);
+      if (onUpdate) onUpdate();
       onClose();
     } catch (error) {
       console.error('Failed to save theme:', error);
@@ -70,18 +48,13 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
         {/* Header */}
         <div className="p-4 border-b border-neutral-200 flex items-center justify-between">
           <div className="flex items-center gap-3">
-             <button 
-              onClick={onClose}
-              className="p-2 -ml-2 text-neutral-400 hover:text-neutral-600 rounded-lg"
-            >
-               <ArrowLeft className="w-5 h-5" />
+            <button onClick={onClose} className="p-2 -ml-2 text-neutral-400 hover:text-neutral-600 rounded-lg">
+              <ArrowLeft className="w-5 h-5" />
             </button>
-            <h2 className="text-lg font-semibold text-neutral-900">
-              Customize Group Design
-            </h2>
+            <h2 className="text-lg font-semibold text-neutral-900">Customize Group Design</h2>
           </div>
           <div className="flex items-center gap-2">
-            <button 
+            <button
               onClick={handleReset}
               className="px-3 py-2 text-neutral-500 hover:bg-neutral-100 rounded-lg text-sm font-medium flex items-center gap-2"
               title="Reset to Defaults"
@@ -89,8 +62,8 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
               <RotateCcw className="w-4 h-4" />
               <span className="hidden sm:inline">Reset</span>
             </button>
-            <button 
-              onClick={handleSave} 
+            <button
+              onClick={handleSave}
               disabled={isSaving}
               className="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 disabled:opacity-50 flex items-center gap-2"
             >
@@ -101,81 +74,24 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-hidden p-4 flex flex-col gap-3">
-          {/* Layout mode toggle */}
-          <div className="flex items-center gap-2 p-2 bg-neutral-50 rounded-lg border border-neutral-200">
-            <span className="text-xs font-medium text-neutral-600 mr-2">Layout mode:</span>
-            <button
-              onClick={() => setLayoutSourceState('template')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium ${layoutSource === 'template' ? 'bg-neutral-900 text-white' : 'bg-white border border-neutral-200 text-neutral-700 hover:bg-neutral-100'}`}
-            >
-              <FileText className="w-3.5 h-3.5" /> Template
-            </button>
-            <button
-              onClick={() => {
-                setLayoutSourceState('uploaded');
-                if (!layoutConfig) setShowLayoutEditor(true);
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium ${layoutSource === 'uploaded' ? 'bg-neutral-900 text-white' : 'bg-white border border-neutral-200 text-neutral-700 hover:bg-neutral-100'}`}
-            >
-              <Layout className="w-3.5 h-3.5" /> Original layout
-            </button>
-            {layoutSource === 'uploaded' && (
-              <button
-                onClick={() => setShowLayoutEditor(true)}
-                className="ml-auto text-xs text-blue-600 hover:text-blue-800"
-              >Edit layout settings…</button>
-            )}
-          </div>
-
-          <div className="flex-1 min-h-0 flex gap-4">
+        <div className="flex-1 overflow-hidden p-4 flex gap-4 min-h-0">
           {/* Editor Pane */}
           <div className="w-1/3 min-w-[320px] flex flex-col overflow-y-auto">
             <ThemeEditor config={themeConfig} onChange={setThemeConfig} />
           </div>
-          
-          {/* Preview Pane */}
-          <div className="flex-1 bg-neutral-100 rounded-lg overflow-hidden border border-neutral-200">
+
+          {/* Live Preview Pane */}
+          <div className="flex-1 bg-neutral-100 rounded-lg overflow-auto border border-neutral-200">
             {resumeData ? (
-              <PDFViewer width="100%" height="100%" className="border-0">
-                {layoutSource === 'uploaded' && layoutConfig ? (
-                  <LayoutPreservingPDF
-                    resumeData={resumeData}
-                    layoutConfig={layoutConfig}
-                    sectionOrder={group?.sectionOrder}
-                    visibleSections={group?.visibleSections}
-                    customSectionDefs={group?.customSectionDefs}
-                  />
-                ) : (
-                  <UnifiedPDF 
-                    resumeData={resumeData}
-                    themeConfig={themeConfig} 
-                  />
-                )}
-              </PDFViewer>
+              <ClassicTemplate resumeData={resumeData} isEditMode={false} />
             ) : (
               <div className="flex items-center justify-center h-full text-neutral-400">
                 <Loader2 className="w-8 h-8 animate-spin" />
               </div>
             )}
           </div>
-          </div>
         </div>
       </div>
-
-      <LayoutConfirmationModal
-        isOpen={showLayoutEditor}
-        onClose={() => setShowLayoutEditor(false)}
-        detectedLayout={layoutConfig}
-        resumeContent={resumeData}
-        customSectionDefs={group?.customSectionDefs || []}
-        sectionOrder={group?.sectionOrder}
-        onConfirm={(finalCfg) => {
-          setLayoutConfigState(finalCfg);
-          setLayoutSourceState('uploaded');
-          setShowLayoutEditor(false);
-        }}
-      />
     </div>
   );
 };

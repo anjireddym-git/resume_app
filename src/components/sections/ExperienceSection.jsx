@@ -1,62 +1,9 @@
 import React from 'react';
-import { View, Text, StyleSheet } from '@react-pdf/renderer';
-import { colors, pdfStyles, webClasses } from '../../styles/theme';
+import { webClasses } from '../../styles/theme';
 
-// PDF Styles
-const styles = StyleSheet.create({
-  section: pdfStyles.section,
-  sectionTitle: pdfStyles.sectionTitle,
-  expItem: {
-    marginBottom: 8,
-  },
-  expHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 2,
-  },
-  expTitle: {
-    fontSize: 11,
-    fontWeight: 'bold',
-    color: colors.text.primary,
-  },
-  expCompany: {
-    fontSize: 10,
-    color: colors.text.muted,
-  },
-  expDate: {
-    fontSize: 9,
-    color: colors.text.light,
-  },
-  bulletList: {
-    marginTop: 3,
-    paddingLeft: 8,
-  },
-  bulletItem: {
-    flexDirection: 'row',
-    marginBottom: 2,
-  },
-  bullet: {
-    fontSize: 9,
-    color: colors.accent.primary,
-    marginRight: 4,
-  },
-  bulletText: {
-    fontSize: 9,
-    color: colors.text.primary,
-    flex: 1,
-    lineHeight: 1.4,
-  },
-  environment: {
-    fontSize: 8,
-    color: colors.text.light,
-    marginTop: 3,
-  },
-});
-
-// Web Component
 export const ExperienceSection = ({ data }) => {
   if (!data?.experience?.length) return null;
-  
+
   return (
     <section className="mb-4">
       <h2 className={webClasses.sectionTitle}>Experience</h2>
@@ -90,43 +37,6 @@ export const ExperienceSection = ({ data }) => {
         </div>
       ))}
     </section>
-  );
-};
-
-// PDF Component
-export const ExperienceSectionPDF = ({ data }) => {
-  if (!data?.experience?.length) return null;
-  
-  return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Experience</Text>
-      {data.experience.map((exp, idx) => (
-        <View key={idx} style={styles.expItem}>
-          <View style={styles.expHeader}>
-            <View>
-              <Text style={styles.expTitle}>{exp.position}</Text>
-              <Text style={styles.expCompany}>
-                {exp.company}{exp.location ? ` - ${exp.location}` : ''}
-              </Text>
-            </View>
-            <Text style={styles.expDate}>{exp.startDate} - {exp.endDate || 'Present'}</Text>
-          </View>
-          {exp.highlights?.filter(h => h && h.trim()).length > 0 && (
-            <View style={styles.bulletList}>
-              {exp.highlights.filter(h => h && h.trim()).map((h, i) => (
-                <View key={i} style={styles.bulletItem}>
-                  <Text style={styles.bullet}>•</Text>
-                  <Text style={styles.bulletText}>{h}</Text>
-                </View>
-              ))}
-            </View>
-          )}
-          {exp.environment && (
-            <Text style={styles.environment}>Environment: {exp.environment}</Text>
-          )}
-        </View>
-      ))}
-    </View>
   );
 };
 

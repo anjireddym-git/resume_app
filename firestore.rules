@@ -29,6 +29,11 @@ service cloud.firestore {
         allow read: if isAuthenticated() && isOwner(userId);
         // Writes only via Cloud Functions (admin SDK bypasses rules)
       }
+
+      // Outreach email templates - full CRUD for the owner
+      match /emailTemplates/{templateId} {
+        allow read, create, update, delete: if isAuthenticated() && isOwner(userId);
+      }
     }
     
     // Resume Groups collection - users can only access their own groups
@@ -49,6 +54,40 @@ service cloud.firestore {
         allow read, write: if isAuthenticated() && 
           get(/databases/$(database)/documents/resumes/$(resumeId)).data.userId == request.auth.uid;
       }
+    }
+
+    // Sent recruiter applications (Tailor-and-Send flow). Users own their docs.
+    match /sentApplications/{appId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+
+      // Reply subdocs are written by Cloud Functions (admin SDK bypasses rules)
+      // but the user must be able to read them and mark them seen.
+      match /replies/{replyId} {
+        allow read: if isAuthenticated() &&
+          get(/databases/$(database)/documents/sentApplications/$(appId)).data.userId == request.auth.uid;
+        allow update: if isAuthenticated() &&
+          get(/databases/$(database)/documents/sentApplications/$(appId)).data.userId == request.auth.uid;
+      }
+    }
+
+    // Follow-up / reply notifications (created by scheduled Cloud Function).
+    match /notifications/{notifId} {
+      allow read, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      // create/delete only via Cloud Functions (admin SDK)
+    }
+
+    // Collection-group rule: lets the live Outreach badge query all
+    // `replies` subdocs filtered by userId server-side. Per-doc reads
+    // already allowed via the nested rule under sentApplications.
+    match /{path=**}/replies/{replyId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // Address -> uid index used by Gmail Pub/Sub push handler. Read-only to clients.
+    match /gmailAddressIndex/{email} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
     }
   }
 }

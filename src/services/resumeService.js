@@ -393,6 +393,8 @@ export const createGeneratedResume = async (
       label: options.label || null,
       createdAt: new Date().toISOString(),
     },
+    ...(options.aiTrace ? { aiTrace: options.aiTrace } : {}),
+    ...(options.aiMetadata ? { aiMetadata: options.aiMetadata } : {}),
   });
 };
 
@@ -417,6 +419,21 @@ export const getResumesInGroup = async (groupId, userId) => {
   return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 };
 
+/**
+ * Fetch every resume the user owns across all groups. Used by the
+ * Tailor-and-Send picker, which lets the AI choose the best base resume
+ * from the user's entire library.
+ */
+export const getAllResumesForUser = async (userId) => {
+  const q = query(
+    collection(db, 'resumes'),
+    where('userId', '==', userId),
+    orderBy('updatedAt', 'desc')
+  );
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+};
+
 export const getResume = async (resumeId) => {
   const docRef = doc(db, 'resumes', resumeId);
   const docSnap = await getDoc(docRef);
@@ -432,6 +449,34 @@ export const updateResume = async (resumeId, data) => {
   const resumeRef = doc(db, 'resumes', resumeId);
   await updateDoc(resumeRef, {
     ...data,
+    updatedAt: serverTimestamp(),
+  });
+};
+
+/**
+ * Update Google Drive sync metadata on a resume.
+ * Stores: driveFileId, driveFolderId, lastSyncedAt, driveWebViewLink.
+ */
+export const updateResumeDriveSync = async (resumeId, { driveFileId, driveFolderId, driveWebViewLink }) => {
+  const resumeRef = doc(db, 'resumes', resumeId);
+  const payload = {
+    driveFileId: driveFileId || null,
+    driveFolderId: driveFolderId || null,
+    driveWebViewLink: driveWebViewLink || null,
+    driveLastSyncedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  await updateDoc(resumeRef, payload);
+};
+
+/**
+ * Cache the Drive folder id on a resume group so we don't search every sync.
+ */
+export const updateGroupDriveFolder = async (groupId, { driveFolderId, driveRootId }) => {
+  const groupRef = doc(db, 'resumeGroups', groupId);
+  await updateDoc(groupRef, {
+    driveFolderId: driveFolderId || null,
+    driveRootId: driveRootId || null,
     updatedAt: serverTimestamp(),
   });
 };
@@ -653,4 +698,282 @@ export const buildFullResume = (group, resume) => {
     layoutSource: group.layoutSource || 'template',
     layoutConfig: group.layoutConfig || null,
   };
+};
+
+// ============================================================================
+// SENT APPLICATIONS / FOLLOW-UPS (Tailor-and-Send flow)
+// ============================================================================
+
+// Compute follow-up interval in ms from {intervalUnit, intervalValue}, with
+// fallback to legacy intervalDays.
+export const computeFollowUpIntervalMs = (followUp) => {
+  if (!followUp) return 7 * 24 * 60 * 60 * 1000;
+  const unit = followUp.intervalUnit;
+  const value = Number(followUp.intervalValue);
+  if (unit && value > 0) {
+    if (unit === 'minutes') return value * 60 * 1000;
+    if (unit === 'hours')   return value * 60 * 60 * 1000;
+    if (unit === 'days')    return value * 24 * 60 * 60 * 1000;
+  }
+  const days = Number(followUp.intervalDays) || 7;
+  return days * 24 * 60 * 60 * 1000;
+};
+
+/**
+ * Record a sent recruiter outreach email so we can show history, attach
+ * replies tracked via Gmail watch, and schedule follow-ups.
+ *
+ * @returns {Promise<string>} new sentApplications document ID
+ */
+export const logSentApplication = async ({
+  userId,
+  resumeId,
+  groupId = null,
+  jobDescription = '',
+  recipientEmail,
+  recipientName = null,
+  cc = [],
+  bcc = [],
+  subject,
+  body,
+  gmailMessageId,
+  gmailThreadId,
+  gmailMessageIdHeader = null,
+  baseResumeId = null,
+  followUp = null,
+  matchAnalysis = null,
+}) => {
+  const docRef = await addDoc(collection(db, 'sentApplications'), {
+    userId,
+    resumeId,
+    baseResumeId,
+    groupId,
+    jobDescription,
+    recipientEmail,
+    recipientName,
+    cc,
+    bcc,
+    subject,
+    body,
+    gmailMessageId,
+    gmailThreadId,
+    gmailMessageIdHeader,
+    matchAnalysis,
+    replyCount: 0,
+    lastReplyAt: null,
+    followUp: followUp
+      ? {
+          enabled: !!followUp.enabled,
+          intervalDays: followUp.intervalDays || 7,
+          intervalUnit: followUp.intervalUnit || 'days',
+          intervalValue: followUp.intervalValue || followUp.intervalDays || 7,
+          maxFollowUps: followUp.maxFollowUps || 3,
+          sentCount: 0,
+          suppressedReason: null,
+          nextDueAt: followUp.enabled
+            ? new Date(Date.now() + computeFollowUpIntervalMs(followUp))
+            : null,
+        }
+      : { enabled: false },
+    sentAt: serverTimestamp(),
+    createdAt: serverTimestamp(),
+  });
+  return docRef.id;
+};
+
+/** List the user's recent sent applications, newest first. */
+export const getSentApplications = async (userId, max = 50) => {
+  const q = query(
+    collection(db, 'sentApplications'),
+    where('userId', '==', userId),
+    orderBy('sentAt', 'desc'),
+    limit(max),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+};
+
+export const getSentApplication = async (id) => {
+  const ref = doc(db, 'sentApplications', id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error('Sent application not found');
+  return { id: snap.id, ...snap.data() };
+};
+
+/** Fetch reply subdocs (metadata + snippet only) for a sent application. */
+export const getRepliesForApplication = async (sentApplicationId) => {
+  const q = query(
+    collection(db, 'sentApplications', sentApplicationId, 'replies'),
+    orderBy('receivedAt', 'desc'),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+};
+
+export const markReplySeen = async (sentApplicationId, replyId) => {
+  const ref = doc(db, 'sentApplications', sentApplicationId, 'replies', replyId);
+  await updateDoc(ref, { seenAt: serverTimestamp() });
+};
+
+/** Increment follow-up counter and reschedule next reminder. */
+export const recordFollowUpSent = async (sentApplicationId) => {
+  const ref = doc(db, 'sentApplications', sentApplicationId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return;
+  const data = snap.data();
+  const followUp = data.followUp || {};
+  const newCount = (followUp.sentCount || 0) + 1;
+  const maxFollowUps = followUp.maxFollowUps || 3;
+  const nextDueAt = newCount >= maxFollowUps
+    ? null
+    : new Date(Date.now() + computeFollowUpIntervalMs(followUp));
+  await updateDoc(ref, {
+    'followUp.sentCount': newCount,
+    'followUp.nextDueAt': nextDueAt,
+    'followUp.suppressedReason': newCount >= maxFollowUps ? 'max-reached' : (followUp.suppressedReason || null),
+  });
+};
+
+export const setFollowUpEnabled = async (sentApplicationId, enabled) => {
+  const ref = doc(db, 'sentApplications', sentApplicationId);
+  await updateDoc(ref, {
+    'followUp.enabled': !!enabled,
+    'followUp.suppressedReason': enabled ? null : 'manual',
+  });
+};
+
+export const snoozeFollowUp = async (sentApplicationId, days = 3) => {
+  const ref = doc(db, 'sentApplications', sentApplicationId);
+  const nextDueAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+  await updateDoc(ref, { 'followUp.nextDueAt': nextDueAt });
+};
+
+// ============================================================================
+// NOTIFICATIONS (in-app surface for follow-up reminders + reply alerts)
+// ============================================================================
+
+export const getUnseenNotifications = async (userId, max = 50) => {
+  const q = query(
+    collection(db, 'notifications'),
+    where('userId', '==', userId),
+    where('seen', '==', false),
+    orderBy('createdAt', 'desc'),
+    limit(max),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+};
+
+export const markNotificationSeen = async (notificationId) => {
+  const ref = doc(db, 'notifications', notificationId);
+  await updateDoc(ref, { seen: true, seenAt: serverTimestamp() });
+};
+
+/**
+ * Build a compact summary used by the AI to pick the best base resume.
+ * Pulls from buildFullResume() output to avoid leaking layout/theme fields.
+ */
+export const compactResumeSummary = (resumeMeta, fullResume) => {
+  const skillsList = Object.values(fullResume?.skills || {}).flat().slice(0, 12);
+  const lastExp = (fullResume?.experience || [])[0] || {};
+  return {
+    id: resumeMeta.id,
+    name: resumeMeta.name || 'Resume',
+    headline: fullResume?.personalInfo?.title || '',
+    summary: (fullResume?.summary || []).slice(0, 4).join(' ').slice(0, 600),
+    topSkills: skillsList,
+    lastRole: lastExp.position ? `${lastExp.position}${lastExp.company ? ' @ ' + lastExp.company : ''}` : '',
+    storedMatchScore: resumeMeta.matchScore || null,
+  };
+};
+
+// ============================================================================
+// OUTREACH USER SETTINGS (Outreach > Settings tab)
+// ============================================================================
+
+export const DEFAULT_OUTREACH_SETTINGS = {
+  replyTrackingEnabled: false,
+  defaultFollowUp: {
+    enabled: true,
+    intervalDays: 7,
+    intervalUnit: 'days', // 'minutes' | 'hours' | 'days'
+    intervalValue: 7,
+    maxFollowUps: 3,
+  },
+  defaultCc: [],
+  defaultBcc: [],
+  signature: '',
+  aiTone: 'professional', // 'professional' | 'casual' | 'enthusiastic'
+  notifyOnReply: true,
+  notifyOnFollowUpDue: true,
+};
+
+export const getUserSettings = async (userId) => {
+  const ref = doc(db, 'users', userId);
+  const snap = await getDoc(ref);
+  const data = snap.exists() ? snap.data() : {};
+  const stored = data.outreachSettings || {};
+  return {
+    ...DEFAULT_OUTREACH_SETTINGS,
+    ...stored,
+    defaultFollowUp: {
+      ...DEFAULT_OUTREACH_SETTINGS.defaultFollowUp,
+      ...(stored.defaultFollowUp || {}),
+    },
+  };
+};
+
+/**
+ * Partial update of outreach settings using dot-paths so untouched fields
+ * are preserved. `defaultFollowUp` nested keys are expanded individually.
+ */
+export const updateUserSettings = async (userId, patch) => {
+  const ref = doc(db, 'users', userId);
+  const update = {};
+  Object.entries(patch).forEach(([k, v]) => {
+    if (k === 'defaultFollowUp' && v && typeof v === 'object') {
+      Object.entries(v).forEach(([k2, v2]) => {
+        update[`outreachSettings.defaultFollowUp.${k2}`] = v2;
+      });
+    } else {
+      update[`outreachSettings.${k}`] = v;
+    }
+  });
+  if (Object.keys(update).length === 0) return;
+  await updateDoc(ref, update);
+};
+
+// ============================================================================
+// EMAIL TEMPLATES (users/{uid}/emailTemplates)
+// ============================================================================
+
+export const listEmailTemplates = async (userId) => {
+  const q = query(
+    collection(db, 'users', userId, 'emailTemplates'),
+    orderBy('updatedAt', 'desc'),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+};
+
+export const createEmailTemplate = async (userId, { name, subject, body, tags = [] }) => {
+  const ref = await addDoc(collection(db, 'users', userId, 'emailTemplates'), {
+    name: name || 'Untitled template',
+    subject: subject || '',
+    body: body || '',
+    tags,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  return ref.id;
+};
+
+export const updateEmailTemplate = async (userId, templateId, patch) => {
+  const ref = doc(db, 'users', userId, 'emailTemplates', templateId);
+  await updateDoc(ref, { ...patch, updatedAt: serverTimestamp() });
+};
+
+export const deleteEmailTemplate = async (userId, templateId) => {
+  const ref = doc(db, 'users', userId, 'emailTemplates', templateId);
+  await deleteDoc(ref);
 };
