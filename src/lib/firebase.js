@@ -27,14 +27,9 @@ googleProvider.setCustomParameters({
   prompt: 'select_account'
 });
 
-// Google Drive + Docs API scopes (for Drive-backed resume sync)
-// drive.file: per-app file access (only files we create / user explicitly opens)
-// documents:  Docs API edit access for those files
-export const GOOGLE_DRIVE_SCOPES = [
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/documents',
-];
-GOOGLE_DRIVE_SCOPES.forEach((scope) => googleProvider.addScope(scope));
+// Workspace API access is requested incrementally through Google Identity
+// Services after sign-in. Firebase Google sign-in stays identity-only.
+export const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
 // Gmail scopes used by the "Tailor & Send" flow. These are requested
 // incrementally (lazily) — only when the user opts in to the email features —

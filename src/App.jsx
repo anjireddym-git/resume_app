@@ -15,7 +15,6 @@ import VersionHistory from './components/VersionHistory';
 import ResumeEditor from './components/ResumeEditor';
 import ClassicTemplate from './templates/ClassicTemplate';
 import GoogleDocsPreview from './components/GoogleDocsPreview';
-import DriveAccessGate from './components/DriveAccessGate';
 import SyncStatusBadge from './components/SyncStatusBadge';
 import SectionReorder from './components/SectionReorder';
 import MatchAnalysis from './components/MatchAnalysis';
@@ -43,7 +42,7 @@ import {
   updateGroupSectionLayout
 } from './services/resumeService';
 import useResumeEditor from './hooks/useResumeEditor';
-import { syncResumeToDriveByIds } from './services/driveSyncService';
+import { drainDriveCleanup, syncResumeToDriveByIds } from './services/driveSyncService';
 
 const INITIAL_RESUME_DATA = {};
 
@@ -77,7 +76,20 @@ const OutreachTabs = ({ view, setView }) => {
 };
 
 function App() {
-  const { user, isAuthenticated, loading: authLoading, signOut, updatePreferences, getGoogleAccessToken, hasGoogleDriveAccess } = useAuth();
+  const {
+    user,
+    isAuthenticated,
+    loading: authLoading,
+    signOut,
+    updatePreferences,
+    getGoogleAccessToken,
+    connectGoogleDrive,
+    retryDriveSync,
+    disconnectGoogleDrive,
+    invalidateGoogleAccessToken,
+    hasGoogleDriveAccess,
+    driveSyncEnabled,
+  } = useAuth();
   const { credits, hasCredits, purchaseCredits } = useCredits();
   
   const [showSplash, setShowSplash] = useState(true);
@@ -126,6 +138,7 @@ function App() {
   const [showLayoutPanel, setShowLayoutPanel] = useState(false);
   // Drive sync status: idle | syncing | synced | error | auth-error
   const [syncStatus, setSyncStatus] = useState('idle');
+  const [syncError, setSyncError] = useState('');
 
   // Template & layout state
   const [selectedTemplate, setSelectedTemplate] = useState('classic');
@@ -371,7 +384,16 @@ function App() {
               case 'status':
                 return { ...s, status: chunk.stage || s.status, model: chunk.model || s.model };
               case 'thought':
-                return { ...s, thoughts: [...s.thoughts, chunk.text || ''], status: 'thinking' };
+                // OpenAI streams reasoning as tiny word-level deltas; Gemini
+                // sends full paragraphs. Always concatenate onto the last entry
+                // so we build one readable block instead of a word-per-line list.
+                return {
+                  ...s,
+                  thoughts: s.thoughts.length === 0
+                    ? [chunk.text || '']
+                    : [...s.thoughts.slice(0, -1), s.thoughts[s.thoughts.length - 1] + (chunk.text || '')],
+                  status: 'thinking',
+                };
               case 'answer':
                 return { ...s, answerPreview: (s.answerPreview || '') + (chunk.text || ''), status: 'writing' };
               case 'usage':
@@ -514,12 +536,13 @@ function App() {
    * Google Doc on first call, updates it on subsequent calls. Failures are
    * logged and reflected in syncStatus; never blocks the user.
    */
-  const autoSyncToDrive = useCallback(async (latestData) => {
-    if (!currentResume || !currentGroup) return;
+  const autoSyncToDrive = useCallback(async (latestData, { force = false, accessToken = null } = {}) => {
+    if (!currentResume || !currentGroup || (!driveSyncEnabled && !force)) return;
     setSyncStatus('syncing');
+    setSyncError('');
     try {
       const result = await syncResumeToDriveByIds({
-        getAccessToken: getGoogleAccessToken,
+        getAccessToken: accessToken ? async () => accessToken : getGoogleAccessToken,
         groupId: currentGroup.id,
         resume: currentResume,
         resumeData: latestData || resumeDataRef.current,
@@ -533,15 +556,21 @@ function App() {
       } : prev);
       setSyncStatus('synced');
     } catch (err) {
-      if (err?.status === 401 || err?.status === 403) {
+      if (err?.kind === 'authorization-required') {
         console.warn('Drive auto-sync needs reconnection');
+        invalidateGoogleAccessToken('Google Drive authorization expired. Reconnect to resume syncing.');
         setSyncStatus('auth-error');
       } else {
         console.error('Drive auto-sync failed:', err);
+        setSyncError(
+          err?.kind === 'api-disabled'
+            ? 'Google Drive API is disabled for this project. Enable it in Google Cloud Console.'
+            : err?.message || 'Drive sync failed. Click to retry.'
+        );
         setSyncStatus('error');
       }
     }
-  }, [currentResume, currentGroup, getGoogleAccessToken, sectionOrder, visibleSections]);
+  }, [currentResume, currentGroup, driveSyncEnabled, getGoogleAccessToken, invalidateGoogleAccessToken, sectionOrder, visibleSections]);
 
   // Auto-sync resume to Drive whenever a new resume is opened that isn't yet
   // backed by a Google Doc. Must be after autoSyncToDrive definition.
@@ -550,18 +579,64 @@ function App() {
   const autoSyncedRef = useRef(new Set());
   useEffect(() => {
     if (!currentResume?.id || !currentGroup?.id) return;
-    if (currentResume.driveFileId) {
-      setSyncStatus('synced');
+    if (!driveSyncEnabled) {
+      setSyncStatus('idle');
       return;
     }
     if (!hasGoogleDriveAccess) {
-      setSyncStatus('idle');
+      setSyncStatus('auth-error');
+      return;
+    }
+    if (currentResume.driveFileId) {
+      setSyncStatus('synced');
       return;
     }
     if (autoSyncedRef.current.has(currentResume.id)) return;
     autoSyncedRef.current.add(currentResume.id);
     autoSyncToDrive(resumeDataRef.current);
-  }, [currentResume?.id, currentGroup?.id, currentResume?.driveFileId, hasGoogleDriveAccess, autoSyncToDrive]);
+  }, [currentResume?.id, currentGroup?.id, currentResume?.driveFileId, driveSyncEnabled, hasGoogleDriveAccess, autoSyncToDrive]);
+
+  useEffect(() => {
+    if (!hasGoogleDriveAccess || !user?.uid) return;
+    drainDriveCleanup({ getAccessToken: getGoogleAccessToken, userId: user.uid }).catch((err) => {
+      if (err?.kind === 'authorization-required') {
+        invalidateGoogleAccessToken('Google Drive authorization expired. Reconnect to finish cleanup.');
+        setSyncStatus('auth-error');
+      } else {
+        console.warn('Drive cleanup failed:', err);
+      }
+    });
+  }, [getGoogleAccessToken, hasGoogleDriveAccess, invalidateGoogleAccessToken, user?.uid]);
+
+  const handleEnableDriveSync = useCallback(async () => {
+    try {
+      const accessToken = await connectGoogleDrive();
+      await autoSyncToDrive(resumeDataRef.current, { force: true, accessToken });
+    } catch (err) {
+      setSyncError(err?.message || 'Could not enable Drive sync.');
+      setSyncStatus('auth-error');
+    }
+  }, [autoSyncToDrive, connectGoogleDrive]);
+
+  const handleReconnectDrive = useCallback(async () => {
+    try {
+      const accessToken = await retryDriveSync();
+      await autoSyncToDrive(resumeDataRef.current, { force: true, accessToken });
+    } catch (err) {
+      setSyncError(err?.message || 'Could not reconnect Google Drive.');
+      setSyncStatus('auth-error');
+    }
+  }, [autoSyncToDrive, retryDriveSync]);
+
+  const handleRetryDriveSync = useCallback(() => {
+    autoSyncToDrive(resumeDataRef.current);
+  }, [autoSyncToDrive]);
+
+  const handleDisconnectDrive = useCallback(async () => {
+    await disconnectGoogleDrive();
+    setSyncStatus('idle');
+    setSyncError('');
+  }, [disconnectGoogleDrive]);
 
   const handleSave = async () => {
     if (!currentResume || !hasUnsavedChanges) return;
@@ -594,8 +669,9 @@ function App() {
       analyticsService.trackResumeSave(currentResume.id, true);
       console.log('Save successful');
 
-      // Always auto-sync to Drive after save (gate already ensures token exists)
-      autoSyncToDrive(dataToSave).catch((e) => console.warn('Auto-sync failed:', e));
+      if (driveSyncEnabled) {
+        autoSyncToDrive(dataToSave).catch((e) => console.warn('Auto-sync failed:', e));
+      }
     } catch (err) {
       console.error('Failed to save:', err);
       setError('Failed to save changes');
@@ -753,11 +829,6 @@ function App() {
   // Show login if not authenticated
   if (!isAuthenticated) {
     return <LoginPage />;
-  }
-
-  // Gate: require Google Drive access before letting user into the dashboard
-  if (!hasGoogleDriveAccess) {
-    return <DriveAccessGate />;
   }
 
   return (
@@ -1055,7 +1126,15 @@ function App() {
                         <div className="flex-1 flex flex-col bg-neutral-100 p-4">
                           <div className="flex items-center justify-between mb-2">
                             <div className="text-xs text-neutral-400">Live Preview</div>
-                            <SyncStatusBadge status={syncStatus} />
+                            <SyncStatusBadge
+                              status={syncStatus}
+                              enabled={driveSyncEnabled}
+                              error={syncError}
+                              onEnable={handleEnableDriveSync}
+                              onReconnect={handleReconnectDrive}
+                              onRetry={handleRetryDriveSync}
+                              onDisconnect={handleDisconnectDrive}
+                            />
                           </div>
                           <div className="flex-1 overflow-auto bg-white rounded-lg shadow-sm border border-neutral-200">
                             {currentResume?.driveFileId ? (

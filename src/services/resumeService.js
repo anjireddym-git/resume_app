@@ -10,6 +10,7 @@ import {
   query,
   where,
   orderBy,
+  onSnapshot,
   serverTimestamp,
   increment,
   limit
@@ -299,6 +300,7 @@ export const deleteResumeGroup = async (groupId) => {
   // First delete all resumes in the group
   const resumes = await getResumesInGroup(groupId, group.userId);
   for (const resume of resumes) {
+    await queueDriveCleanup(group.userId, resume.driveFileId);
     await deleteDoc(doc(db, 'resumes', resume.id));
   }
   
@@ -421,8 +423,8 @@ export const getResumesInGroup = async (groupId, userId) => {
 
 /**
  * Fetch every resume the user owns across all groups. Used by the
- * Tailor-and-Send picker, which lets the AI choose the best base resume
- * from the user's entire library.
+ * Tailor-and-Send picker so the user can choose the base resume from
+ * their entire library.
  */
 export const getAllResumesForUser = async (userId) => {
   const q = query(
@@ -481,6 +483,29 @@ export const updateGroupDriveFolder = async (groupId, { driveFolderId, driveRoot
   });
 };
 
+/**
+ * Queue deletion of an app-created Google Doc until the user next authorizes
+ * Drive. Browser access tokens are intentionally not persisted server-side.
+ */
+export const queueDriveCleanup = async (userId, fileId) => {
+  if (!userId || !fileId) return;
+  await setDoc(doc(db, 'users', userId, 'driveCleanup', fileId), {
+    fileId,
+    createdAt: serverTimestamp(),
+  });
+};
+
+export const getDriveCleanupQueue = async (userId) => {
+  if (!userId) return [];
+  const snapshot = await getDocs(collection(db, 'users', userId, 'driveCleanup'));
+  return snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+};
+
+export const removeDriveCleanup = async (userId, fileId) => {
+  if (!userId || !fileId) return;
+  await deleteDoc(doc(db, 'users', userId, 'driveCleanup', fileId));
+};
+
 export const updateResumeCustomData = async (resumeId, customData) => {
   console.log('[resumeService] updateResumeCustomData called', { resumeId });
   console.log('[resumeService] Raw customData:', JSON.stringify(customData, null, 2));
@@ -532,6 +557,7 @@ export const updateResumeMatchAnalysis = async (resumeId, matchScore, matchAnaly
 
 export const deleteResume = async (resumeId, groupId) => {
   const existingResume = await getResume(resumeId);
+  await queueDriveCleanup(existingResume.userId, existingResume.driveFileId);
   await deleteDoc(doc(db, 'resumes', resumeId));
 
   if (existingResume.parentResumeId) {
@@ -764,10 +790,10 @@ export const logSentApplication = async ({
     followUp: followUp
       ? {
           enabled: !!followUp.enabled,
-          intervalDays: followUp.intervalDays || 7,
+          intervalDays: followUp.intervalDays ?? 7,
           intervalUnit: followUp.intervalUnit || 'days',
-          intervalValue: followUp.intervalValue || followUp.intervalDays || 7,
-          maxFollowUps: followUp.maxFollowUps || 3,
+          intervalValue: followUp.intervalValue ?? followUp.intervalDays ?? 7,
+          maxFollowUps: followUp.maxFollowUps ?? 3,
           sentCount: 0,
           suppressedReason: null,
           nextDueAt: followUp.enabled
@@ -810,13 +836,140 @@ export const getRepliesForApplication = async (sentApplicationId) => {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
+/** Fetch outgoing follow-ups recorded for a sent application. */
+export const getOutgoingMessagesForApplication = async (sentApplicationId) => {
+  const q = query(
+    collection(db, 'sentApplications', sentApplicationId, 'outgoingMessages'),
+    orderBy('sentAt', 'asc'),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+};
+
+const threadTimestampToMillis = (value) => {
+  if (!value) return 0;
+  if (typeof value.toMillis === 'function') return value.toMillis();
+  const millis = new Date(value).getTime();
+  return Number.isNaN(millis) ? 0 : millis;
+};
+
+const cleanThreadBody = (body = '') => String(body)
+  .replace(/\r/g, '')
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&amp;/g, '&')
+  .split(/\n?On .{0,300}wrote:\s*\n?/i)[0]
+  .split(/\n?-{2,}\s*Original Message\s*-{2,}/i)[0]
+  .replace(/[ \t]+\n/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim();
+
+const elapsedLabel = (elapsedMinutes) => {
+  if (elapsedMinutes < 60) return `${Math.max(0, elapsedMinutes)} minutes`;
+  if (elapsedMinutes < 48 * 60) return `${Math.round(elapsedMinutes / 60)} hours`;
+  return `${Math.round(elapsedMinutes / 1440)} days`;
+};
+
+/** Build the chronological thread and timing facts used to draft a follow-up. */
+export const buildFollowUpDraftContext = (application, replies = [], outgoingMessages = []) => {
+  const messages = [
+    {
+      id: `initial-${application.id}`,
+      direction: 'outgoing',
+      kind: 'initial-outreach',
+      from: application.senderEmail || '',
+      to: application.recipientEmail || '',
+      subject: application.subject || '',
+      body: cleanThreadBody(application.body || ''),
+      timestamp: application.sentAt,
+      messageIdHeader: application.gmailMessageIdHeader || null,
+    },
+    ...outgoingMessages.map((message) => ({
+      id: message.id,
+      direction: 'outgoing',
+      kind: 'follow-up',
+      from: message.from || '',
+      to: message.to || application.recipientEmail || '',
+      subject: message.subject || `Re: ${application.subject || ''}`,
+      body: cleanThreadBody(message.body || message.snippet || ''),
+      timestamp: message.sentAt,
+      messageIdHeader: message.gmailMessageIdHeader || null,
+    })),
+    ...replies.map((reply) => ({
+      id: reply.id,
+      direction: 'incoming',
+      kind: 'recruiter-reply',
+      from: reply.from || application.recipientEmail || '',
+      to: reply.to || '',
+      subject: reply.subject || `Re: ${application.subject || ''}`,
+      body: cleanThreadBody(reply.body || reply.snippet || ''),
+      timestamp: reply.receivedAt,
+      messageIdHeader: reply.messageIdHeader || null,
+    })),
+  ].sort((a, b) => threadTimestampToMillis(a.timestamp) - threadTimestampToMillis(b.timestamp));
+
+  const now = Date.now();
+  const latestMessage = messages[messages.length - 1];
+  const latestOutgoing = [...messages].reverse().find((message) => message.direction === 'outgoing');
+  const latestIncoming = [...messages].reverse().find((message) => message.direction === 'incoming');
+  const minutesSince = (message) => {
+    const millis = threadTimestampToMillis(message?.timestamp);
+    return millis ? Math.max(0, Math.floor((now - millis) / 60000)) : 0;
+  };
+  const latestElapsedMinutes = minutesSince(latestMessage);
+  const outgoingElapsedMinutes = minutesSince(latestOutgoing);
+
+  return {
+    originalEmail: { subject: application.subject || '', body: application.body || '' },
+    threadMessages: messages.map((message) => ({
+      direction: message.direction,
+      kind: message.kind,
+      from: message.from,
+      to: message.to,
+      subject: message.subject,
+      body: message.body.slice(0, 3000),
+      sentAt: threadTimestampToMillis(message.timestamp)
+        ? new Date(threadTimestampToMillis(message.timestamp)).toISOString()
+        : null,
+    })),
+    timingContext: {
+      generatedAt: new Date(now).toISOString(),
+      followUpNumber: (application.followUp?.sentCount || 0) + 1,
+      latestMessageDirection: latestMessage?.direction || 'outgoing',
+      latestMessageAt: threadTimestampToMillis(latestMessage?.timestamp)
+        ? new Date(threadTimestampToMillis(latestMessage.timestamp)).toISOString()
+        : null,
+      elapsedSinceLatestMessage: elapsedLabel(latestElapsedMinutes),
+      elapsedSinceLatestMessageMinutes: latestElapsedMinutes,
+      lastOutgoingAt: threadTimestampToMillis(latestOutgoing?.timestamp)
+        ? new Date(threadTimestampToMillis(latestOutgoing.timestamp)).toISOString()
+        : null,
+      elapsedSinceLastOutgoing: elapsedLabel(outgoingElapsedMinutes),
+      elapsedSinceLastOutgoingMinutes: outgoingElapsedMinutes,
+      lastIncomingAt: threadTimestampToMillis(latestIncoming?.timestamp)
+        ? new Date(threadTimestampToMillis(latestIncoming.timestamp)).toISOString()
+        : null,
+    },
+    latestMessageIdHeader: latestMessage?.messageIdHeader || application.gmailMessageIdHeader || null,
+  };
+};
+
+/** Load the latest stored thread before asking AI to draft the next message. */
+export const getFollowUpDraftContext = async (application) => {
+  const [replies, outgoingMessages] = await Promise.all([
+    getRepliesForApplication(application.id),
+    getOutgoingMessagesForApplication(application.id).catch(() => []),
+  ]);
+  return buildFollowUpDraftContext(application, replies, outgoingMessages);
+};
+
 export const markReplySeen = async (sentApplicationId, replyId) => {
   const ref = doc(db, 'sentApplications', sentApplicationId, 'replies', replyId);
   await updateDoc(ref, { seenAt: serverTimestamp() });
 };
 
 /** Increment follow-up counter and reschedule next reminder. */
-export const recordFollowUpSent = async (sentApplicationId) => {
+export const recordFollowUpSent = async (sentApplicationId, message = null) => {
   const ref = doc(db, 'sentApplications', sentApplicationId);
   const snap = await getDoc(ref);
   if (!snap.exists()) return;
@@ -832,13 +985,56 @@ export const recordFollowUpSent = async (sentApplicationId) => {
     'followUp.nextDueAt': nextDueAt,
     'followUp.suppressedReason': newCount >= maxFollowUps ? 'max-reached' : (followUp.suppressedReason || null),
   });
+
+  if (message?.gmailMessageId) {
+    const messageRef = doc(db, 'sentApplications', sentApplicationId, 'outgoingMessages', message.gmailMessageId);
+    try {
+      await setDoc(messageRef, {
+        userId: data.userId,
+        sentApplicationId,
+        type: 'follow-up',
+        gmailMessageId: message.gmailMessageId,
+        gmailMessageIdHeader: message.gmailMessageIdHeader || null,
+        gmailThreadId: message.gmailThreadId || data.gmailThreadId || null,
+        from: message.from || '',
+        to: message.to || data.recipientEmail || '',
+        cc: message.cc || [],
+        bcc: message.bcc || [],
+        subject: message.subject || '',
+        body: message.body || '',
+        snippet: message.snippet || '',
+        sentAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+      }, { merge: true });
+    } catch (err) {
+      // During a staggered deploy, the optional timeline subcollection rule
+      // may not be live yet. Gmail already sent the message, so preserve the
+      // established follow-up flow and let thread backfill import it later.
+      console.warn('Outgoing follow-up timeline save unavailable:', err.message);
+    }
+  }
 };
 
 export const setFollowUpEnabled = async (sentApplicationId, enabled) => {
   const ref = doc(db, 'sentApplications', sentApplicationId);
+  if (!enabled) {
+    await updateDoc(ref, {
+      'followUp.enabled': false,
+      'followUp.suppressedReason': 'manual',
+    });
+    return;
+  }
+
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return;
+  const followUp = snap.data().followUp || {};
+  const currentDueAt = threadTimestampToMillis(followUp.nextDueAt);
   await updateDoc(ref, {
-    'followUp.enabled': !!enabled,
-    'followUp.suppressedReason': enabled ? null : 'manual',
+    'followUp.enabled': true,
+    'followUp.suppressedReason': null,
+    'followUp.nextDueAt': currentDueAt > Date.now()
+      ? followUp.nextDueAt
+      : new Date(Date.now() + computeFollowUpIntervalMs(followUp)),
   });
 };
 
@@ -864,23 +1060,41 @@ export const getUnseenNotifications = async (userId, max = 50) => {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
+export const subscribeToUnseenNotifications = (userId, onNext, onError, max = 50) => {
+  const q = query(
+    collection(db, 'notifications'),
+    where('userId', '==', userId),
+    where('seen', '==', false),
+    orderBy('createdAt', 'desc'),
+    limit(max),
+  );
+  return onSnapshot(
+    q,
+    (snap) => onNext(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    onError,
+  );
+};
+
 export const markNotificationSeen = async (notificationId) => {
   const ref = doc(db, 'notifications', notificationId);
   await updateDoc(ref, { seen: true, seenAt: serverTimestamp() });
 };
 
 /**
- * Build a compact summary used by the AI to pick the best base resume.
+ * Build a compact resume summary for lightweight comparison surfaces.
  * Pulls from buildFullResume() output to avoid leaking layout/theme fields.
  */
 export const compactResumeSummary = (resumeMeta, fullResume) => {
   const skillsList = Object.values(fullResume?.skills || {}).flat().slice(0, 12);
   const lastExp = (fullResume?.experience || [])[0] || {};
+  const summaryText = Array.isArray(fullResume?.summary)
+    ? fullResume.summary.slice(0, 4).join(' ')
+    : String(fullResume?.summary || '');
   return {
     id: resumeMeta.id,
     name: resumeMeta.name || 'Resume',
     headline: fullResume?.personalInfo?.title || '',
-    summary: (fullResume?.summary || []).slice(0, 4).join(' ').slice(0, 600),
+    summary: summaryText.slice(0, 600),
     topSkills: skillsList,
     lastRole: lastExp.position ? `${lastExp.position}${lastExp.company ? ' @ ' + lastExp.company : ''}` : '',
     storedMatchScore: resumeMeta.matchScore || null,

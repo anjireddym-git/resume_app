@@ -1,49 +1,88 @@
 /**
  * googleDriveService.js
  *
- * Thin wrapper over the Google Drive v3 + Docs v1 REST APIs.
+ * Thin wrapper over the Google Drive v3 REST API.
  * All methods take a `getAccessToken` async function (provided by AuthContext)
- * so they can refresh / re-prompt for OAuth on demand.
+ * so callers can require an already-authorized token without triggering
+ * OAuth popups from background work.
  *
  * Scopes required:
  *   - https://www.googleapis.com/auth/drive.file
- *   - https://www.googleapis.com/auth/documents
  */
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const HTML_MIME = 'text/html; charset=UTF-8';
 const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
 const ROOT_FOLDER_NAME = 'ResumeAI';
+const MAX_UPLOAD_RETRIES = 2;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isRetriableDriveStatus(status) {
+  return status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function summarizeBody(body) {
+  const text = String(body || '').trim();
+  return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+}
+
+export function classifyDriveApiError(status, body = '') {
+  const normalized = String(body).toLowerCase();
+  if (status === 401) return 'authorization-required';
+  if (status === 403 && (
+    normalized.includes('accessnotconfigured')
+    || normalized.includes('service_disabled')
+    || normalized.includes('api has not been used')
+    || normalized.includes('api is disabled')
+    || normalized.includes('enable it by visiting')
+  )) {
+    return 'api-disabled';
+  }
+  if (status === 403 && (
+    normalized.includes('insufficient authentication scopes')
+    || normalized.includes('insufficientpermissions')
+    || normalized.includes('insufficient permission')
+  )) {
+    return 'authorization-required';
+  }
+  if (status === 403) return 'permission-denied';
+  if (isRetriableDriveStatus(status)) return 'server-error';
+  return 'request-failed';
+}
 
 class DriveApiError extends Error {
-  constructor(message, status, body) {
+  constructor(message, status, body, kind = classifyDriveApiError(status, body)) {
     super(message);
     this.name = 'DriveApiError';
     this.status = status;
     this.body = body;
+    this.kind = kind;
   }
 }
 
 /**
- * Internal: authenticated fetch that handles token refresh on 401/403.
+ * Internal: authenticated fetch. Authorization failures are surfaced to the UI
+ * so a reconnect popup can be opened only from a user click.
  */
-async function authedFetch(getAccessToken, url, options = {}, retry = true) {
+async function authedFetch(getAccessToken, url, options = {}, retryCount = 0) {
   const token = await getAccessToken();
   const headers = { ...(options.headers || {}), Authorization: `Bearer ${token}` };
   const res = await fetch(url, { ...options, headers });
 
-  if ((res.status === 401 || res.status === 403) && retry) {
-    // Token may be expired or revoked — try one re-auth and retry once.
-    return authedFetch(getAccessToken, url, options, false);
-  }
-
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new DriveApiError(`Drive API ${res.status}: ${res.statusText}`, res.status, body);
+    if (isRetriableDriveStatus(res.status) && retryCount < MAX_UPLOAD_RETRIES) {
+      await sleep(400 * (retryCount + 1));
+      return authedFetch(getAccessToken, url, options, retryCount + 1);
+    }
+    const detail = summarizeBody(body) || res.statusText || 'Request failed';
+    throw new DriveApiError(`Drive API ${res.status}: ${detail}`, res.status, body);
   }
   return res;
 }
@@ -110,7 +149,31 @@ export async function uploadDocxAsGoogleDoc(getAccessToken, blob, name, folderId
   };
 
   const boundary = `boundary_${Math.random().toString(36).slice(2)}`;
-  const body = await buildMultipartBody(metadata, blob, boundary);
+  const body = await buildMultipartBody(metadata, blob, boundary, DOCX_MIME);
+
+  const url = `${DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name,mimeType,webViewLink`;
+  const data = await authedJson(getAccessToken, url, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  return data;
+}
+
+/**
+ * Upload HTML as a new Google Doc (converted) inside the given folder.
+ * HTML import is used for the managed Drive mirror because it is less brittle
+ * than DOCX conversion for generated resume content.
+ */
+export async function uploadHtmlAsGoogleDoc(getAccessToken, htmlBlob, name, folderId) {
+  const metadata = {
+    name,
+    parents: [folderId],
+    mimeType: GOOGLE_DOC_MIME,
+  };
+
+  const boundary = `boundary_${Math.random().toString(36).slice(2)}`;
+  const body = await buildMultipartBody(metadata, htmlBlob, boundary, HTML_MIME);
 
   const url = `${DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name,mimeType,webViewLink`;
   const data = await authedJson(getAccessToken, url, {
@@ -131,6 +194,19 @@ export async function updateDocxContent(getAccessToken, fileId, blob) {
     method: 'PATCH',
     headers: { 'Content-Type': DOCX_MIME },
     body: blob,
+  });
+  return data;
+}
+
+/**
+ * Replace an existing Google Doc with freshly generated HTML content.
+ */
+export async function updateHtmlContent(getAccessToken, fileId, htmlBlob) {
+  const url = `${DRIVE_UPLOAD}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime`;
+  const data = await authedJson(getAccessToken, url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': HTML_MIME },
+    body: htmlBlob,
   });
   return data;
 }
@@ -190,23 +266,15 @@ export function getOpenInDocsUrl(fileId) {
  * Build a multipart/related body combining JSON metadata and a binary blob.
  * Required for Drive's multipart upload format.
  */
-async function buildMultipartBody(metadata, blob, boundary) {
-  const enc = new TextEncoder();
-  const head = enc.encode(
+async function buildMultipartBody(metadata, blob, boundary, mediaMimeType) {
+  const head =
     `--${boundary}\r\n` +
     'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
     JSON.stringify(metadata) + '\r\n' +
     `--${boundary}\r\n` +
-    `Content-Type: ${DOCX_MIME}\r\n\r\n`
-  );
-  const tail = enc.encode(`\r\n--${boundary}--`);
-  const blobBuf = new Uint8Array(await blob.arrayBuffer());
-
-  const body = new Uint8Array(head.length + blobBuf.length + tail.length);
-  body.set(head, 0);
-  body.set(blobBuf, head.length);
-  body.set(tail, head.length + blobBuf.length);
-  return body;
+    `Content-Type: ${mediaMimeType}\r\n\r\n`;
+  const tail = `\r\n--${boundary}--`;
+  return new Blob([head, blob, tail], { type: `multipart/related; boundary=${boundary}` });
 }
 
 export { DriveApiError, ROOT_FOLDER_NAME };

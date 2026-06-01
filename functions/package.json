@@ -10,7 +10,7 @@
     "logs": "firebase functions:log"
   },
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "index.js",
   "dependencies": {
@@ -20,7 +20,7 @@
     "firebase-functions": "^6.6.0",
     "jszip": "^3.10.1",
     "mammoth": "^1.8.0",
-    "openai": "^4.73.0",
+    "openai": "^6.39.1",
     "stripe": "^14.10.0"
   },
   "devDependencies": {

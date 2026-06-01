@@ -5,12 +5,13 @@ import {
   getUnseenNotifications,
   markNotificationSeen,
   getSentApplication,
+  getFollowUpDraftContext,
   snoozeFollowUp,
   setFollowUpEnabled,
   recordFollowUpSent,
 } from '../services/resumeService';
 import { geminiService } from '../services/geminiService';
-import { sendGmail, GmailAuthError } from '../services/gmailService';
+import { sendGmail, getMessageIdHeader, GmailAuthError } from '../services/gmailService';
 
 /**
  * FollowUpDashboard: shows follow-up reminders created by the scanDueFollowUps
@@ -50,13 +51,18 @@ const FollowUpDashboard = ({ isOpen, onClose }) => {
     setError('');
     try {
       const app = await getSentApplication(notif.sentApplicationId);
+      const context = await getFollowUpDraftContext(app);
       const draft = await geminiService.draftFollowUpEmail(
-        { subject: app.subject, body: app.body },
+        context,
         app.jobDescription || '',
         null,
-        Math.max(1, Math.floor((Date.now() - (app.sentAt?.toMillis?.() || Date.now())) / 86400000)),
       );
-      setDrafts((d) => ({ ...d, [notif.id]: { subject: draft.subject, body: draft.body, app } }));
+      setDrafts((d) => ({ ...d, [notif.id]: {
+        subject: draft.subject,
+        body: draft.body,
+        app,
+        latestMessageIdHeader: context.latestMessageIdHeader,
+      } }));
     } catch (err) {
       console.error(err);
       setError(err.message || 'Failed to draft follow-up.');
@@ -73,7 +79,7 @@ const FollowUpDashboard = ({ isOpen, onClose }) => {
     setError('');
     try {
       const accessToken = await ensureGmailAccess({ withReadonly: false });
-      await sendGmail({
+      const sendResp = await sendGmail({
         accessToken,
         fromEmail: user.email,
         fromName: user.displayName || undefined,
@@ -83,9 +89,20 @@ const FollowUpDashboard = ({ isOpen, onClose }) => {
         subject: draft.subject,
         body: draft.body,
         threadId: app.gmailThreadId,
-        inReplyTo: app.gmailMessageIdHeader,
+        inReplyTo: draft.latestMessageIdHeader || app.gmailMessageIdHeader,
       });
-      await recordFollowUpSent(notif.sentApplicationId);
+      const messageIdHeader = await getMessageIdHeader(accessToken, sendResp.id);
+      await recordFollowUpSent(notif.sentApplicationId, {
+        gmailMessageId: sendResp.id,
+        gmailMessageIdHeader: messageIdHeader,
+        gmailThreadId: sendResp.threadId,
+        from: user.email,
+        to: app.recipientEmail,
+        cc: app.cc || [],
+        bcc: app.bcc || [],
+        subject: draft.subject,
+        body: draft.body,
+      });
       await markNotificationSeen(notif.id);
       setItems((arr) => arr.filter((x) => x.id !== notif.id));
       setDrafts((d) => { const { [notif.id]: _, ...rest } = d; return rest; });

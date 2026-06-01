@@ -9,8 +9,6 @@
  * the bundle. Attachments are passed as Blobs.
  */
 
-const GMAIL_UPLOAD_URL =
-  'https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=multipart';
 const GMAIL_SEND_URL =
   'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
 
@@ -47,6 +45,21 @@ const normalizeRecipients = (input) => {
 
 const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 export const validateEmail = (addr) => EMAIL_RE.test(String(addr || '').trim());
+
+export const formatGmailWatchError = (err) => {
+  const message = String(err?.message || err || '');
+  const topicMatch = message.match(/projects\/[^/\s"'{}]+\/topics\/[^/\s"'{}]+/);
+  const topicName = topicMatch?.[0] || 'your Gmail Pub/Sub topic';
+
+  if (/Gmail watch failed|Cloud PubSub|Cloud Pub\/Sub|PERMISSION_DENIED|not authorized|forbidden/i.test(message)) {
+    return (
+      `Reply tracking needs Google Cloud setup. Grant Pub/Sub Publisher on ${topicName} ` +
+      'to gmail-api-push@system.gserviceaccount.com, deploy functions/indexes, then try again.'
+    );
+  }
+
+  return message || 'Failed to enable reply tracking.';
+};
 
 /**
  * Build a RFC 2822 multipart/mixed MIME message with a base64-encoded
@@ -171,18 +184,23 @@ export async function sendGmail({
   const payload = { raw: base64UrlEncode(raw) };
   if (threadId) payload.threadId = threadId;
 
-  // Use the non-upload endpoint when there is no attachment — it's lighter
-  // and Gmail accepts the raw payload via the standard send endpoint too.
-  const endpoint = attachment ? GMAIL_UPLOAD_URL : GMAIL_SEND_URL;
-
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
+  let resp;
+  try {
+    // The Message.raw field already contains the full RFC 2822 MIME message,
+    // including attachments, encoded as base64url. Gmail accepts that JSON
+    // resource on the standard send endpoint. The /upload endpoint expects a
+    // multipart upload protocol body and rejects JSON { raw } with 400.
+    resp = await fetch(GMAIL_SEND_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    throw new Error(`Could not reach Gmail API: ${err.message || 'network request failed'}`);
+  }
 
   if (resp.status === 401 || resp.status === 403) {
     const errBody = await resp.text().catch(() => '');

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   collection,
   collectionGroup,
+  doc,
   query,
   where,
   onSnapshot,
@@ -22,6 +23,23 @@ export default function useOutreachCounts() {
   const { user } = useAuth();
   const [unseenReplies, setUnseenReplies] = useState(0);
   const [dueFollowUps, setDueFollowUps] = useState(0);
+  const [preferences, setPreferences] = useState({
+    notifyOnReply: true,
+    notifyOnFollowUpDue: true,
+  });
+
+  // Notification settings control badges without hiding the underlying
+  // Follow-ups and Replies tabs.
+  useEffect(() => {
+    if (!user?.uid) return undefined;
+    return onSnapshot(doc(db, 'users', user.uid), (snap) => {
+      const settings = snap.data()?.outreachSettings || {};
+      setPreferences({
+        notifyOnReply: settings.notifyOnReply !== false,
+        notifyOnFollowUpDue: settings.notifyOnFollowUpDue !== false,
+      });
+    });
+  }, [user?.uid]);
 
   // follow-up-due notifications
   useEffect(() => {
@@ -77,5 +95,11 @@ export default function useOutreachCounts() {
     return () => { unsubApps(); unsubReplies(); };
   }, [user?.uid]);
 
-  return { unseenReplies, dueFollowUps, total: unseenReplies + dueFollowUps };
+  const visibleReplies = preferences.notifyOnReply ? unseenReplies : 0;
+  const visibleFollowUps = preferences.notifyOnFollowUpDue ? dueFollowUps : 0;
+  return {
+    unseenReplies: visibleReplies,
+    dueFollowUps: visibleFollowUps,
+    total: visibleReplies + visibleFollowUps,
+  };
 }

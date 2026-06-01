@@ -1,114 +1,134 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
+  onAuthStateChanged,
   signInWithPopup,
   signOut as firebaseSignOut,
-  onAuthStateChanged,
-  GoogleAuthProvider,
 } from 'firebase/auth';
-import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
-import { auth, googleProvider, db, GMAIL_SEND_SCOPE, GMAIL_READONLY_SCOPE, GOOGLE_DRIVE_SCOPES } from '../lib/firebase';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import {
+  auth,
+  db,
+  GMAIL_READONLY_SCOPE,
+  GMAIL_SEND_SCOPE,
+  GOOGLE_DRIVE_SCOPE,
+  googleProvider,
+} from '../lib/firebase';
 import { analyticsService } from '../services/analyticsService';
+import {
+  GoogleAuthorizationRequiredError,
+  loadGoogleIdentityServices,
+  requestGoogleAccessToken,
+} from '../services/googleAuthService';
 
 const AuthContext = createContext(null);
+const GOOGLE_OAUTH_CLIENT_ID = import.meta.env.VITE_GOOGLE_OAUTH_CLIENT_ID || '';
+const EMPTY_SCOPES = new Set();
 
-// In-memory only — never persist Google OAuth access tokens to localStorage.
-// We DO cache to sessionStorage (cleared on tab close) so reloads within the
-// same browser session skip the re-auth popup.
-const TOKEN_LIFETIME_MS = 55 * 60 * 1000; // tokens last ~1h, refresh at 55min
+const sessionTokenKey = (uid) => `gat_session_${uid}`;
+const gmailGrantedKey = (uid) => `gmail_granted_${uid}`;
 
-// ---- sessionStorage helpers for the Google OAuth access token ----
-const _sessionTokenKey = (uid) => `gat_session_${uid}`;
-
-const _readSessionToken = (uid) => {
+function readSessionToken(uid) {
   try {
-    const raw = sessionStorage.getItem(_sessionTokenKey(uid));
+    const raw = sessionStorage.getItem(sessionTokenKey(uid));
     if (!raw) return null;
-    const { token, issuedAt, scopes } = JSON.parse(raw);
-    if (!token || !issuedAt) return null;
-    if (Date.now() - issuedAt > TOKEN_LIFETIME_MS) {
-      sessionStorage.removeItem(_sessionTokenKey(uid));
+    const { token, expiresAt, scopes } = JSON.parse(raw);
+    if (!token || !expiresAt || Date.now() >= expiresAt) {
+      sessionStorage.removeItem(sessionTokenKey(uid));
       return null;
     }
-    return { token, issuedAt, scopes: new Set(scopes || []) };
-  } catch { return null; }
-};
+    return { token, expiresAt, scopes: new Set(scopes || []) };
+  } catch {
+    return null;
+  }
+}
 
-const _writeSessionToken = (uid, token, issuedAt, scopes) => {
+function writeSessionToken(uid, tokenState) {
   try {
-    sessionStorage.setItem(_sessionTokenKey(uid), JSON.stringify({
-      token, issuedAt, scopes: [...scopes],
+    sessionStorage.setItem(sessionTokenKey(uid), JSON.stringify({
+      token: tokenState.token,
+      expiresAt: tokenState.expiresAt,
+      scopes: [...tokenState.scopes],
     }));
   } catch {}
-};
+}
 
-const _clearSessionToken = (uid) => {
-  try { sessionStorage.removeItem(_sessionTokenKey(uid)); } catch {}
-};
+function clearSessionToken(uid) {
+  try { sessionStorage.removeItem(sessionTokenKey(uid)); } catch {}
+}
+
+function readGmailGrantedSet(uid) {
+  try {
+    const raw = localStorage.getItem(gmailGrantedKey(uid));
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function writeGmailGrantedSet(uid, scopes) {
+  try {
+    const gmailScopes = [...scopes].filter((scope) => (
+      scope === GMAIL_SEND_SCOPE || scope === GMAIL_READONLY_SCOPE
+    ));
+    localStorage.setItem(gmailGrantedKey(uid), JSON.stringify(gmailScopes));
+  } catch {}
+}
+
+function clearGmailGranted(uid) {
+  try { localStorage.removeItem(gmailGrantedKey(uid)); } catch {}
+}
+
+function getAuthorizationErrorMessage(error, feature) {
+  if (error?.kind === 'popup-closed') return `${feature} authorization was cancelled.`;
+  if (error?.kind === 'popup-blocked') return 'Browser blocked the Google authorization popup. Allow popups and try again.';
+  if (error?.kind === 'scope-denied') return `Please grant the requested ${feature} permission to continue.`;
+  return error?.message || `Could not connect ${feature}.`;
+}
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 };
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  // Google OAuth access token for Drive/Docs APIs. Kept only in memory.
-  const [googleAccessToken, setGoogleAccessToken] = useState(null);
-  const [driveAuthState, setDriveAuthState] = useState('unknown'); // unknown|connecting|granted|denied|error
+  const [googleToken, setGoogleToken] = useState(null);
+  const [driveAuthState, setDriveAuthState] = useState('unknown');
   const [driveAuthError, setDriveAuthError] = useState(null);
-  // Track which extra OAuth scopes the current access token carries.
-  // Updated whenever we (re)acquire a token through signInWithPopup so the
-  // UI can lazily request Gmail access without disrupting the base sign-in.
-  const [grantedScopes, setGrantedScopes] = useState(new Set());
-  const tokenIssuedAtRef = useRef(null);
 
-  // localStorage key for remembering that the user has granted Drive scopes.
-  // We use this on reload to know whether to silently re-acquire the token.
-  const driveGrantedKey = (uid) => `drive_granted_${uid}`;
-  // Persist which Gmail scopes a user previously granted so we know whether
-  // to silently re-acquire them on reload.
-  const gmailGrantedKey = (uid) => `gmail_granted_${uid}`;
+  const clearGoogleToken = useCallback((message = null) => {
+    setGoogleToken(null);
+    if (user?.uid) clearSessionToken(user.uid);
+    if (message) {
+      setDriveAuthState('denied');
+      setDriveAuthError(message);
+    } else {
+      setDriveAuthState('unknown');
+      setDriveAuthError(null);
+    }
+  }, [user?.uid]);
 
-  const persistDriveGranted = (uid) => {
-    try { localStorage.setItem(driveGrantedKey(uid), '1'); } catch {}
-  };
-  const wasDriveGranted = (uid) => {
-    try { return localStorage.getItem(driveGrantedKey(uid)) === '1'; } catch { return false; }
-  };
-  const clearDriveGranted = (uid) => {
-    try { localStorage.removeItem(driveGrantedKey(uid)); } catch {}
-  };
-
-  // Persisted set of extra Google OAuth scopes (e.g. gmail.send) the user
-  // has previously granted. We only use it as a hint to silently re-request
-  // those scopes after a reload — the source of truth is the OAuth server.
-  const readGmailGrantedSet = (uid) => {
-    try {
-      const raw = localStorage.getItem(gmailGrantedKey(uid));
-      if (!raw) return new Set();
-      return new Set(JSON.parse(raw));
-    } catch { return new Set(); }
-  };
-  const writeGmailGrantedSet = (uid, set) => {
-    try {
-      localStorage.setItem(gmailGrantedKey(uid), JSON.stringify([...set]));
-    } catch {}
-  };
-  const clearGmailGranted = (uid) => {
-    try { localStorage.removeItem(gmailGrantedKey(uid)); } catch {}
-  };
+  useEffect(() => {
+    loadGoogleIdentityServices().catch(() => {
+      // Authorization buttons surface configuration and loading errors on click.
+    });
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        // Create/update user document in Firestore
+      try {
+        if (!firebaseUser) {
+          setUser(null);
+          setGoogleToken(null);
+          setDriveAuthState('unknown');
+          return;
+        }
+
         const userRef = doc(db, 'users', firebaseUser.uid);
         const userSnap = await getDoc(userRef);
-        
+        const initialPreferences = { currentGroupId: null, currentResumeId: null, driveSyncEnabled: false };
         const userData = {
           uid: firebaseUser.uid,
           email: firebaseUser.email,
@@ -118,63 +138,58 @@ export const AuthProvider = ({ children }) => {
         };
 
         if (!userSnap.exists()) {
-          // New user
           await setDoc(userRef, {
             ...userData,
             createdAt: serverTimestamp(),
-            preferences: {
-              currentGroupId: null,
-              currentResumeId: null,
-            }
+            preferences: initialPreferences,
           });
         } else {
-          // Existing user - update last login
           await setDoc(userRef, userData, { merge: true });
         }
 
         setUser({
           ...userData,
-          preferences: userSnap.exists() ? userSnap.data().preferences : {}
+          preferences: userSnap.exists() ? userSnap.data().preferences : initialPreferences,
         });
 
-        // Restore cached access token from sessionStorage so the user
-        // doesn't get a re-auth popup on every page reload.
-        const cached = _readSessionToken(firebaseUser.uid);
+        setGoogleToken(null);
+        setDriveAuthState('unknown');
+        setDriveAuthError(null);
+        const cached = readSessionToken(firebaseUser.uid);
         if (cached) {
-          setGoogleAccessToken(cached.token);
-          tokenIssuedAtRef.current = cached.issuedAt;
-          setGrantedScopes(cached.scopes);
-          setDriveAuthState('granted');
+          setGoogleToken(cached);
+          if (cached.scopes.has(GOOGLE_DRIVE_SCOPE)) setDriveAuthState('granted');
         }
-      } else {
-        setUser(null);
+      } catch (error) {
+        console.error('Failed to initialize authenticated user:', error);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     });
-
     return () => unsubscribe();
   }, []);
 
-  const signInWithGoogle = async () => {
+  useEffect(() => {
+    if (!googleToken?.expiresAt) return undefined;
+    const delay = Math.max(0, googleToken.expiresAt - Date.now());
+    const timer = setTimeout(() => {
+      clearGoogleToken('Google authorization expired. Reconnect to resume Drive sync.');
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [clearGoogleToken, googleToken?.expiresAt]);
+
+  const updatePreferences = useCallback(async (preferences) => {
+    if (!user) return;
+    await setDoc(doc(db, 'users', user.uid), { preferences }, { merge: true });
+    setUser((previous) => ({
+      ...previous,
+      preferences: { ...previous.preferences, ...preferences },
+    }));
+  }, [user]);
+
+  const signInWithGoogle = useCallback(async () => {
     try {
       const result = await signInWithPopup(auth, googleProvider);
-      // Capture OAuth credential for Drive/Docs API calls
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        const issuedAt = Date.now();
-        const scopes = new Set(GOOGLE_DRIVE_SCOPES);
-        setGoogleAccessToken(credential.accessToken);
-        tokenIssuedAtRef.current = issuedAt;
-        setDriveAuthState('granted');
-        if (result.user?.uid) {
-          persistDriveGranted(result.user.uid);
-          _writeSessionToken(result.user.uid, credential.accessToken, issuedAt, scopes);
-        }
-        // Base sign-in only carries drive.file + documents; reset extra scopes
-        // tracking — the user will need to re-grant Gmail next time they use it.
-        setGrantedScopes(scopes);
-      }
-      // Track login event
       analyticsService.trackLogin('google');
       analyticsService.initSession(result.user.uid, {
         email_domain: result.user.email?.split('@')[1] || 'unknown',
@@ -185,184 +200,147 @@ export const AuthProvider = ({ children }) => {
       analyticsService.trackAPIError('auth/signin', error.code, error.message);
       throw error;
     }
-  };
-
-  /**
-   * Re-prompt the user to grant Drive permissions and refresh the access token.
-   * Used when the token expires or when Drive permissions were revoked.
-   */
-  const reconnectGoogleDrive = useCallback(async () => {
-    setDriveAuthState('connecting');
-    setDriveAuthError(null);
-    try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        const issuedAt = Date.now();
-        const scopes = new Set(GOOGLE_DRIVE_SCOPES);
-        setGoogleAccessToken(credential.accessToken);
-        tokenIssuedAtRef.current = issuedAt;
-        setDriveAuthState('granted');
-        if (result.user?.uid) {
-          persistDriveGranted(result.user.uid);
-          _writeSessionToken(result.user.uid, credential.accessToken, issuedAt, scopes);
-        }
-        // Re-auth via the base provider drops any previously requested
-        // extra scopes from the new token. Reset our tracking accordingly.
-        setGrantedScopes(scopes);
-        return credential.accessToken;
-      }
-      setDriveAuthState('denied');
-      throw new Error('Google access token was not returned. Please grant Drive permission.');
-    } catch (err) {
-      const code = err?.code || '';
-      if (code.includes('popup-closed') || code.includes('cancelled')) {
-        setDriveAuthState('denied');
-        setDriveAuthError('Drive access is required to use the app. Please complete the popup.');
-      } else if (code.includes('popup-blocked')) {
-        setDriveAuthState('error');
-        setDriveAuthError('Browser blocked the popup. Allow popups for this site and try again.');
-      } else {
-        setDriveAuthState('error');
-        setDriveAuthError(err?.message || 'Could not connect to Google Drive.');
-      }
-      throw err;
-    }
   }, []);
 
-  /**
-   * Returns a valid Google access token, re-authenticating silently if expired.
-   */
-  const getGoogleAccessToken = useCallback(async () => {
-    const issued = tokenIssuedAtRef.current;
-    const expired = !issued || Date.now() - issued > TOKEN_LIFETIME_MS;
-    if (googleAccessToken && !expired) return googleAccessToken;
-    return reconnectGoogleDrive();
-  }, [googleAccessToken, reconnectGoogleDrive]);
-
-  /**
-   * Lazily acquire an OAuth access token that carries the requested extra
-   * Google scopes (in addition to the existing Drive/Docs scopes). Used by
-   * the Tailor-and-Send flow to request gmail.send / gmail.readonly only
-   * when the user actually opts in to the email features.
-   *
-   * Returns the new access token. Always re-prompts via signInWithPopup so
-   * the consent screen is shown for newly added scopes.
-   */
-  const requestAdditionalGoogleScopes = useCallback(async (extraScopes = []) => {
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({
-      prompt: 'consent',          // force consent screen for incremental scopes
-      include_granted_scopes: 'true',
-      login_hint: user?.email || undefined,
-    });
-    // Always re-request the base Drive/Docs scopes so the new token can still
-    // be used for Drive operations after this re-auth.
-    [...GOOGLE_DRIVE_SCOPES, ...extraScopes].forEach((s) => provider.addScope(s));
-
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('Google did not return an access token. Please try again.');
+  const requestScopes = useCallback(async (scopes, { prompt = 'consent', feature = 'Google' } = {}) => {
+    try {
+      const tokenState = await requestGoogleAccessToken({
+        clientId: GOOGLE_OAUTH_CLIENT_ID,
+        scopes,
+        loginHint: user?.email,
+        prompt,
+      });
+      setGoogleToken(tokenState);
+      if (user?.uid) {
+        writeSessionToken(user.uid, tokenState);
+        writeGmailGrantedSet(user.uid, tokenState.scopes);
+      }
+      if (tokenState.scopes.has(GOOGLE_DRIVE_SCOPE)) {
+        setDriveAuthState('granted');
+        setDriveAuthError(null);
+      }
+      return tokenState.token;
+    } catch (error) {
+      if (feature === 'Google Drive') {
+        setDriveAuthState(error?.kind === 'popup-closed' || error?.kind === 'scope-denied' ? 'denied' : 'error');
+        setDriveAuthError(getAuthorizationErrorMessage(error, feature));
+      }
+      throw error;
     }
-    const issuedAt = Date.now();
-    const next = new Set([...GOOGLE_DRIVE_SCOPES, ...extraScopes]);
-    setGoogleAccessToken(credential.accessToken);
-    tokenIssuedAtRef.current = issuedAt;
-    setGrantedScopes(next);
-    if (result.user?.uid) {
-      const persisted = readGmailGrantedSet(result.user.uid);
-      extraScopes.forEach((s) => persisted.add(s));
-      writeGmailGrantedSet(result.user.uid, persisted);
-      persistDriveGranted(result.user.uid);
-      _writeSessionToken(result.user.uid, credential.accessToken, issuedAt, next);
-    }
-    return credential.accessToken;
-  }, [user?.email]);
+  }, [user?.email, user?.uid]);
 
-  const hasScope = useCallback(
-    (scope) => grantedScopes.has(scope),
-    [grantedScopes]
+  const connectGoogleDrive = useCallback(async ({ prompt = 'consent' } = {}) => {
+    setDriveAuthState('connecting');
+    setDriveAuthError(null);
+    const token = await requestScopes([GOOGLE_DRIVE_SCOPE], { prompt, feature: 'Google Drive' });
+    await updatePreferences({ driveSyncEnabled: true });
+    return token;
+  }, [requestScopes, updatePreferences]);
+
+  const retryDriveSync = useCallback(
+    () => connectGoogleDrive({ prompt: '' }),
+    [connectGoogleDrive]
   );
 
-  /**
-   * Convenience helper: ensure the in-memory access token carries gmail.send
-   * (and optionally gmail.readonly when reply tracking is enabled). If the
-   * scope is missing, prompts the user via signInWithPopup. Returns the
-   * valid access token.
-   */
+  const disconnectGoogleDrive = useCallback(async () => {
+    clearGoogleToken();
+    await updatePreferences({ driveSyncEnabled: false });
+  }, [clearGoogleToken, updatePreferences]);
+
+  const getGoogleAccessToken = useCallback(async () => {
+    if (
+      googleToken?.token
+      && googleToken.expiresAt > Date.now()
+      && googleToken.scopes.has(GOOGLE_DRIVE_SCOPE)
+    ) {
+      return googleToken.token;
+    }
+    throw new GoogleAuthorizationRequiredError('Reconnect Google Drive to continue syncing.');
+  }, [googleToken]);
+
   const ensureGmailAccess = useCallback(async ({ withReadonly = false } = {}) => {
     const needed = [GMAIL_SEND_SCOPE];
     if (withReadonly) needed.push(GMAIL_READONLY_SCOPE);
-    const missing = needed.filter((s) => !grantedScopes.has(s));
-    const issued = tokenIssuedAtRef.current;
-    const expired = !issued || Date.now() - issued > TOKEN_LIFETIME_MS;
-    if (!missing.length && googleAccessToken && !expired) {
-      return googleAccessToken;
+    if (
+      googleToken?.token
+      && googleToken.expiresAt > Date.now()
+      && needed.every((scope) => googleToken.scopes.has(scope))
+    ) {
+      return googleToken.token;
     }
-    return requestAdditionalGoogleScopes(needed);
-  }, [grantedScopes, googleAccessToken, requestAdditionalGoogleScopes]);
+    return requestScopes(needed, { prompt: 'consent', feature: 'Gmail' });
+  }, [googleToken, requestScopes]);
 
-  const signOut = async () => {
+  const signOut = useCallback(async () => {
     try {
-      // Track logout before signing out
       analyticsService.trackLogout();
       analyticsService.clearUser();
       if (user?.uid) {
-        clearDriveGranted(user.uid);
+        clearSessionToken(user.uid);
         clearGmailGranted(user.uid);
-        _clearSessionToken(user.uid);
       }
-      setGoogleAccessToken(null);
-      tokenIssuedAtRef.current = null;
+      setGoogleToken(null);
       setDriveAuthState('unknown');
       setDriveAuthError(null);
-      setGrantedScopes(new Set());
       await firebaseSignOut(auth);
     } catch (error) {
       console.error('Sign out error:', error);
       throw error;
     }
-  };
+  }, [user?.uid]);
 
-  const updatePreferences = async (preferences) => {
-    if (!user) return;
-    
-    const userRef = doc(db, 'users', user.uid);
-    await setDoc(userRef, { preferences }, { merge: true });
-    setUser(prev => ({ ...prev, preferences: { ...prev.preferences, ...preferences } }));
-  };
-
-  const value = {
+  const grantedScopes = googleToken?.scopes || EMPTY_SCOPES;
+  const hasGoogleDriveAccess = !!(
+    googleToken?.token
+    && googleToken.expiresAt > Date.now()
+    && grantedScopes.has(GOOGLE_DRIVE_SCOPE)
+  );
+  const value = useMemo(() => ({
     user,
     loading,
     signInWithGoogle,
     signOut,
     updatePreferences,
     isAuthenticated: !!user,
-    // Google Drive integration
-    googleAccessToken,
+    googleAccessToken: googleToken?.token || null,
     getGoogleAccessToken,
-    reconnectGoogleDrive,
-    hasGoogleDriveAccess: !!googleAccessToken,
+    connectGoogleDrive,
+    reconnectGoogleDrive: retryDriveSync,
+    retryDriveSync,
+    disconnectGoogleDrive,
+    invalidateGoogleAccessToken: clearGoogleToken,
+    hasGoogleDriveAccess,
+    driveSyncEnabled: user?.preferences?.driveSyncEnabled === true,
     driveAuthState,
     driveAuthError,
-    wasDriveGrantedBefore: user?.uid ? wasDriveGranted(user.uid) : false,
-    // Gmail integration (lazy / incremental consent)
     hasGmailSendScope: grantedScopes.has(GMAIL_SEND_SCOPE),
     hasGmailReadScope: grantedScopes.has(GMAIL_READONLY_SCOPE),
-    hasScope,
+    hasScope: (scope) => grantedScopes.has(scope),
     ensureGmailAccess,
-    requestAdditionalGoogleScopes,
+    requestAdditionalGoogleScopes: (scopes) => requestScopes(scopes, { prompt: 'consent' }),
     wasGmailSendGrantedBefore: user?.uid ? readGmailGrantedSet(user.uid).has(GMAIL_SEND_SCOPE) : false,
     wasGmailReadGrantedBefore: user?.uid ? readGmailGrantedSet(user.uid).has(GMAIL_READONLY_SCOPE) : false,
-  };
+  }), [
+    clearGoogleToken,
+    connectGoogleDrive,
+    disconnectGoogleDrive,
+    driveAuthError,
+    driveAuthState,
+    ensureGmailAccess,
+    getGoogleAccessToken,
+    googleToken?.token,
+    grantedScopes,
+    hasGoogleDriveAccess,
+    loading,
+    requestScopes,
+    retryDriveSync,
+    signInWithGoogle,
+    signOut,
+    updatePreferences,
+    user,
+  ]);
 
-  return (
-    <AuthContext.Provider value={value}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
 export default AuthContext;

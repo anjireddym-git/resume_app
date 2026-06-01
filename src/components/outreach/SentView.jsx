@@ -33,7 +33,7 @@ const deriveStatus = (app) => {
   return { id: 'awaiting', label: 'Awaiting reply', tone: 'bg-neutral-100 text-neutral-600' };
 };
 
-const SentView = ({ user, selectedAppId, onSelect, onCompose }) => {
+const SentView = ({ user, selectedAppId, refreshKey, onSelect, onCompose }) => {
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -53,7 +53,7 @@ const SentView = ({ user, selectedAppId, onSelect, onCompose }) => {
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [user?.uid]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [user?.uid, refreshKey]);
 
   useEffect(() => {
     if (!selectedAppId) { setSelectedApp(null); return; }
@@ -180,6 +180,7 @@ const SentView = ({ user, selectedAppId, onSelect, onCompose }) => {
             <SentDetailPanel
               user={user}
               application={selectedApp}
+              refreshKey={refreshKey}
               onChange={() => {
                 // refresh list and detail
                 load();

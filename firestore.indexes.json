@@ -34,12 +34,28 @@
       ]
     },
     {
+      "collectionGroup": "sentApplications",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "followUp.enabled", "order": "ASCENDING" },
+        { "fieldPath": "followUp.nextDueAt", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "notifications",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "userId", "order": "ASCENDING" },
         { "fieldPath": "seen", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "replies",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "userId", "order": "ASCENDING" },
+        { "fieldPath": "receivedAt", "order": "DESCENDING" }
       ]
     }
   ],

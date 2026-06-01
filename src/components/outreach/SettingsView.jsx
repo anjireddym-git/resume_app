@@ -10,7 +10,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import {
   getUserSettings, updateUserSettings, DEFAULT_OUTREACH_SETTINGS,
 } from '../../services/resumeService';
-import { validateEmail } from '../../services/gmailService';
+import { formatGmailWatchError, validateEmail } from '../../services/gmailService';
 
 const startGmailWatchFn = httpsCallable(functions, 'startGmailWatch');
 const stopGmailWatchFn  = httpsCallable(functions, 'stopGmailWatch');
@@ -158,7 +158,7 @@ const SettingsView = ({ user }) => {
       }
       persist('replyTrackingEnabled', next);
       await load();
-    } catch (err) { setError(err.message); }
+    } catch (err) { setError(formatGmailWatchError(err)); }
     finally { setBusy(false); }
   };
 

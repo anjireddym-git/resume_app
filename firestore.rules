@@ -34,6 +34,11 @@ service cloud.firestore {
       match /emailTemplates/{templateId} {
         allow read, create, update, delete: if isAuthenticated() && isOwner(userId);
       }
+
+      // App-created Google Docs are deleted when the user next authorizes Drive.
+      match /driveCleanup/{fileId} {
+        allow read, create, update, delete: if isAuthenticated() && isOwner(userId);
+      }
     }
     
     // Resume Groups collection - users can only access their own groups
@@ -70,6 +75,16 @@ service cloud.firestore {
         allow update: if isAuthenticated() &&
           get(/databases/$(database)/documents/sentApplications/$(appId)).data.userId == request.auth.uid;
       }
+
+      // Outgoing follow-ups are saved after Gmail confirms the send so the
+      // Sent view can render the complete conversation thread.
+      match /outgoingMessages/{messageId} {
+        allow read: if isAuthenticated() &&
+          get(/databases/$(database)/documents/sentApplications/$(appId)).data.userId == request.auth.uid;
+        allow create, update: if isAuthenticated() &&
+          get(/databases/$(database)/documents/sentApplications/$(appId)).data.userId == request.auth.uid &&
+          request.resource.data.userId == request.auth.uid;
+      }
     }
 
     // Follow-up / reply notifications (created by scheduled Cloud Function).
@@ -91,4 +106,3 @@ service cloud.firestore {
     }
   }
 }
-

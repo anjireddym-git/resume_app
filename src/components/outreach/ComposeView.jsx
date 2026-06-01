@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Loader2, Sparkles, Send, FileText, ChevronRight, ChevronLeft,
+  Loader2, Send, FileText, ChevronRight, ChevronLeft,
   CheckCircle2, AlertTriangle, Paperclip, Bell, RefreshCw, ExternalLink,
   Settings as SettingsIcon, Mail,
 } from 'lucide-react';
@@ -11,7 +11,6 @@ import {
   getResumeGroup,
   getResume,
   buildFullResume,
-  compactResumeSummary,
   createGeneratedResume,
   logSentApplication,
   updateResumeMatchAnalysis,
@@ -22,8 +21,10 @@ import { geminiService } from '../../services/geminiService';
 import { generateDocxBlob } from '../../services/exportService';
 import { sendGmail, validateEmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
 import { analyticsService } from '../../services/analyticsService';
+import AgentThinkingPane from '../AgentThinkingPane';
 
 const STEPS = ['jd', 'pickBase', 'tailor', 'email', 'send', 'done'];
+const AGENT_FIELDS = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'];
 const STEP_LABEL = {
   jd: 'Job description',
   pickBase: 'Base resume',
@@ -43,6 +44,55 @@ const appendSignature = (body, signature) => {
   return `${(body || '').trimEnd()}\n\n—\n${sig}\n`;
 };
 
+const createAgentStreamState = () => ({
+  thoughts: [],
+  answerPreview: '',
+  usage: null,
+  status: 'starting',
+  elapsedMs: 0,
+  validator: null,
+  model: '',
+  cost: null,
+  error: '',
+});
+
+const reduceAgentStreamChunk = (state, chunk) => {
+  if (!state) return state;
+  switch (chunk.type) {
+    case 'status':
+      return {
+        ...state,
+        status: chunk.stage || state.status,
+        model: chunk.model || state.model,
+        cost: chunk.cost ?? state.cost,
+      };
+    case 'thought':
+      return {
+        ...state,
+        thoughts: state.thoughts.length === 0
+          ? [chunk.text || '']
+          : [...state.thoughts.slice(0, -1), state.thoughts[state.thoughts.length - 1] + (chunk.text || '')],
+        status: 'thinking',
+      };
+    case 'answer':
+      return {
+        ...state,
+        answerPreview: `${state.answerPreview || ''}${chunk.text || ''}`,
+        status: 'writing',
+      };
+    case 'usage':
+      return { ...state, usage: chunk };
+    case 'validator':
+      return { ...state, validator: chunk, status: 'validating' };
+    case 'persisted':
+      return { ...state, status: 'persisting' };
+    case 'error':
+      return { ...state, error: chunk.message || 'Agent error', status: 'error' };
+    default:
+      return state;
+  }
+};
+
 const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
   const { ensureGmailAccess, hasGmailSendScope } = useAuth();
   const { credits, hasCredits } = useCredits();
@@ -58,13 +108,13 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
 
   const [allResumes, setAllResumes] = useState([]);
   const [loadingResumes, setLoadingResumes] = useState(false);
-  const [aiPick, setAiPick] = useState(null);
   const [selectedBaseId, setSelectedBaseId] = useState(null);
   const [baseGroup, setBaseGroup] = useState(null);
 
   const [tailoredResume, setTailoredResume] = useState(null);
   const [newResumeId, setNewResumeId] = useState(null);
   const [matchAnalysis, setMatchAnalysis] = useState(null);
+  const [agentStream, setAgentStream] = useState(null);
 
   const [emailDraft, setEmailDraft] = useState({
     to: '', cc: '', bcc: '', subject: '', body: '', recipientName: '', confidence: 0,
@@ -95,8 +145,9 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
 
   const reset = () => {
     setStep('jd'); setError(''); setBusy(false);
-    setJobDescription(''); setAllResumes([]); setAiPick(null); setSelectedBaseId(null);
+    setJobDescription(''); setAllResumes([]); setSelectedBaseId(null);
     setBaseGroup(null); setTailoredResume(null); setNewResumeId(null); setMatchAnalysis(null);
+    setAgentStream(null);
     setEmailDraft({ to: '', cc: '', bcc: '', subject: '', body: '', recipientName: '', confidence: 0 });
     setShowCcBcc(false); setSendResult(null);
     if (settings) {
@@ -118,37 +169,66 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
       const resumes = await getAllResumesForUser(user.uid);
       if (resumes.length === 0) { setError('You have no resumes yet. Create one first.'); setStep('jd'); return; }
       setAllResumes(resumes);
-      const summaries = [];
-      const groupCache = new Map();
-      for (const r of resumes.slice(0, 25)) {
-        let group = groupCache.get(r.groupId);
-        if (!group) { try { group = await getResumeGroup(r.groupId); groupCache.set(r.groupId, group); } catch { continue; } }
-        const full = buildFullResume(group, r);
-        summaries.push(compactResumeSummary(r, full));
-      }
-      const pick = await geminiService.pickBestResume(summaries, jobDescription);
-      setAiPick(pick);
-      setSelectedBaseId(pick.resumeId);
+      setSelectedBaseId(null);
     } catch (err) {
-      console.error(err); setError(err.message || 'Failed to pick best resume.'); setStep('jd');
+      console.error(err); setError(err.message || 'Failed to load your resumes.'); setStep('jd');
     } finally { setLoadingResumes(false); setBusy(false); }
   };
 
   const handleConfirmBase = async () => {
     if (!selectedBaseId) { setError('Pick a base resume to continue.'); return; }
     setError(''); setBusy(true); setStep('tailor');
+    setAgentStream(createAgentStreamState());
+    const startedAt = Date.now();
+    const elapsedTimer = setInterval(() => {
+      setAgentStream((state) => state ? { ...state, elapsedMs: Date.now() - startedAt } : state);
+    }, 250);
     try {
       const resume = await getResume(selectedBaseId);
       const group = await getResumeGroup(resume.groupId);
       const full = buildFullResume(group, resume);
       setBaseGroup(group);
-      const updated = await geminiService.updateResumeForJob(full, jobDescription);
-      setTailoredResume(updated);
-      const newId = await createGeneratedResume(user.uid, resume, updated, {
-        mode: 'optimize',
+      const label = `Tailor & Send - ${new Date().toLocaleDateString()}`;
+      const final = await geminiService.streamResumeAgent(
+        full,
         jobDescription,
-        label: `Tailor & Send — ${new Date().toLocaleDateString()}`,
-      });
+        AGENT_FIELDS,
+        (chunk) => setAgentStream((state) => reduceAgentStreamChunk(state, chunk)),
+        {
+          sourceResumeId: resume.id,
+          mode: 'job',
+          label,
+        },
+      );
+      const updated = final?.resume;
+      if (!updated) throw new Error(final?.error || 'AI returned an empty tailored resume.');
+      setTailoredResume(updated);
+      const validatorOk = final?.validator?.ok !== false;
+      setAgentStream((state) => state ? {
+        ...state,
+        status: validatorOk ? 'done' : 'review-required',
+        validator: final?.validator || state.validator,
+        elapsedMs: Date.now() - startedAt,
+      } : state);
+
+      let newId = final?.newResumeId || null;
+      if (!newId) {
+        console.warn('[Outreach] Streaming agent did not persist; falling back to client save.');
+        newId = await createGeneratedResume(user.uid, resume, updated, {
+          mode: 'optimize',
+          jobDescription,
+          fieldsToUpdate: AGENT_FIELDS,
+          label,
+          aiTrace: {
+            thoughts: final?.aiTrace?.thoughts || '',
+            usage: final?.usage || null,
+            model: final?.aiTrace?.model || '',
+            validator: final?.validator || null,
+            savedAt: new Date().toISOString(),
+          },
+          aiMetadata: final?.metadata || null,
+        });
+      }
       setNewResumeId(newId);
       analyticsService.trackAIOptimizeSuccess(0, 0, 'tailor_and_send');
       analyticsService.trackCreditsUsed('tailor_and_send', 1);
@@ -159,8 +239,18 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
       } catch (e) { console.warn('match analysis failed:', e.message); }
       await draftEmail(updated);
     } catch (err) {
-      console.error(err); setError(err.message || 'Failed to tailor resume.'); setStep('pickBase');
-    } finally { setBusy(false); }
+      console.error(err);
+      setError(err.message || 'Failed to tailor resume.');
+      setAgentStream((state) => state ? {
+        ...state,
+        status: 'error',
+        error: err.message || 'Failed to tailor resume.',
+        elapsedMs: Date.now() - startedAt,
+      } : state);
+    } finally {
+      clearInterval(elapsedTimer);
+      setBusy(false);
+    }
   };
 
   const draftEmail = async (resumeForDraft) => {
@@ -339,15 +429,15 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
               />
               <div className="flex items-center justify-between">
                 <p className="text-xs text-neutral-500">
-                  Uses 2 credits: 1 for tailoring + 1 for the draft email. Resume pick is included.
+                  Tailoring uses streaming-agent credits. Match analysis and the draft email use 1 credit each. You choose the base resume next.
                 </p>
                 <button
                   onClick={handleSubmitJD}
                   disabled={busy || !jobDescription.trim()}
                   className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
                 >
-                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                  Find best resume
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                  Choose resume
                 </button>
               </div>
             </div>
@@ -359,21 +449,10 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
                 <div className="py-12 text-center"><Loader2 className="w-6 h-6 text-neutral-400 animate-spin mx-auto" /></div>
               ) : (
                 <>
-                  {aiPick && (
-                    <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                      <div className="flex items-center gap-2 text-sm font-medium text-blue-900">
-                        <Sparkles className="w-4 h-4" /> AI pick (score {aiPick.score}/100)
-                      </div>
-                      <p className="text-xs text-blue-800 mt-1">{aiPick.reasoning}</p>
-                    </div>
-                  )}
                   <label className="text-sm font-medium text-neutral-700">Choose base resume</label>
                   <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                    {(aiPick?.ranking || allResumes.map((r) => ({ resumeId: r.id, score: null }))).map((rk) => {
-                      const r = allResumes.find((x) => x.id === rk.resumeId);
-                      if (!r) return null;
+                    {allResumes.map((r) => {
                       const isSelected = selectedBaseId === r.id;
-                      const isAi = aiPick?.resumeId === r.id;
                       return (
                         <button
                           key={r.id}
@@ -386,11 +465,9 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="text-sm font-medium text-neutral-900 truncate">{r.name}</span>
-                              {isAi && <span className="text-[10px] bg-blue-600 text-white px-1.5 py-0.5 rounded">AI PICK</span>}
                             </div>
                             <div className="text-xs text-neutral-500 truncate">
-                              {r.matchScore != null && <span>stored match {r.matchScore}% · </span>}
-                              {rk.score != null && <span>fit {rk.score}/100</span>}
+                              {r.matchScore != null ? `Stored match ${r.matchScore}%` : 'Ready to tailor for this job'}
                             </div>
                           </div>
                         </button>
@@ -419,9 +496,36 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
           )}
 
           {step === 'tailor' && (
-            <div className="py-16 text-center space-y-3">
-              <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
-              <p className="text-sm text-neutral-700">Tailoring resume, then drafting your email…</p>
+            <div className="space-y-3">
+              <div>
+                <h2 className="text-sm font-semibold text-neutral-900">Tailoring resume for this job</h2>
+                <p className="text-xs text-neutral-500 mt-1">
+                  The agent is aligning the role, skills, and recent experience before drafting your email.
+                  {agentStream?.cost ? ` This tailoring run uses ${agentStream.cost} credits.` : ''}
+                </p>
+              </div>
+              <div className="h-[28rem]">
+                <AgentThinkingPane
+                  thoughts={agentStream?.thoughts || []}
+                  answerPreview={agentStream?.answerPreview || ''}
+                  usage={agentStream?.usage}
+                  status={agentStream?.status || 'starting'}
+                  elapsedMs={agentStream?.elapsedMs || 0}
+                  validator={agentStream?.validator}
+                  model={agentStream?.model || ''}
+                  error={agentStream?.error || ''}
+                />
+              </div>
+              {agentStream?.status === 'error' && (
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => setStep('pickBase')}
+                    className="h-9 px-3 border border-neutral-200 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-50"
+                  >
+                    Back to resume selection
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

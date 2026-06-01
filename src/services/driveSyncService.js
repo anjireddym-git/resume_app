@@ -1,113 +1,170 @@
 /**
- * driveSyncService.js
- *
- * High-level orchestration of "sync this resume to Google Drive".
- *
- * Flow:
- *   1. Ensure ResumeAI/<groupName>/ folder exists in user's Drive
- *   2. Generate DOCX blob from current resumeData (reuses exportService)
- *   3. If resume has no driveFileId → upload as new Google Doc
- *      Else → update existing file's content
- *   4. Persist driveFileId/folderId/syncedAt to Firestore
+ * High-level orchestration for publishing Firestore-backed resumes as managed
+ * Google Docs mirrors in the user's Drive.
  */
 
-import { ensureGroupFolder, uploadDocxAsGoogleDoc, updateDocxContent, getFile, DriveApiError } from './googleDriveService';
-import { generateDocxBlob } from './exportService';
-import { updateResumeDriveSync, updateGroupDriveFolder, getResumeGroup } from './resumeService';
+import {
+  deleteFile,
+  DriveApiError,
+  ensureGroupFolder,
+  getFile,
+  renameFile,
+  updateHtmlContent,
+  uploadHtmlAsGoogleDoc,
+} from './googleDriveService';
+import { generateDriveMirrorHtmlBlob } from './driveMirrorHtmlService';
+import {
+  getDriveCleanupQueue,
+  getResumeGroup,
+  removeDriveCleanup,
+  updateGroupDriveFolder,
+  updateResumeDriveSync,
+} from './resumeService';
+
+const syncQueues = new Map();
 
 function safeFileName(name) {
   return String(name || 'Resume').replace(/[\\/:*?"<>|]/g, ' ').trim() || 'Resume';
 }
 
-/**
- * Sync a resume to Google Drive (create or update).
- *
- * @param {Object} params
- * @param {Function} params.getAccessToken - async function returning a fresh Drive token
- * @param {Object} params.group - { id, name, driveFolderId? } current resume group
- * @param {Object} params.resume - { id, name, driveFileId?, customData, ... }
- * @param {Object} params.resumeData - the full merged resumeData to render (incl. personalInfo, sections)
- * @param {Array<string>} params.sectionOrder - visible section order
- * @returns {Promise<{ fileId, folderId, webViewLink, created }>}
- */
-export async function syncResumeToDrive({ getAccessToken, group, resume, resumeData, sectionOrder }) {
-  if (!group?.id) throw new Error('Group is required to sync to Drive');
-  if (!resume?.id) throw new Error('Resume is required to sync to Drive');
-
-  // ── Step 1: ensure folder exists ─────────────────────────────────────────
+async function ensureCurrentGroupFolder(getAccessToken, group) {
+  const expectedName = group.name || 'Default';
   let folderId = group.driveFolderId;
   let rootId = group.driveRootId;
 
-  if (!folderId) {
-    const folders = await ensureGroupFolder(getAccessToken, group.name || 'Default');
-    folderId = folders.folderId;
-    rootId = folders.rootId;
-    // Cache on the group doc so future syncs skip the lookup
+  if (folderId) {
     try {
-      await updateGroupDriveFolder(group.id, { driveFolderId: folderId, driveRootId: rootId });
-    } catch (e) {
-      console.warn('[driveSync] Could not cache group folder id:', e);
-    }
-  } else {
-    // Validate cached folder still exists; if not, re-create
-    try {
-      await getFile(getAccessToken, folderId);
-    } catch (err) {
-      if (err instanceof DriveApiError && err.status === 404) {
-        const folders = await ensureGroupFolder(getAccessToken, group.name || 'Default');
-        folderId = folders.folderId;
-        rootId = folders.rootId;
-        await updateGroupDriveFolder(group.id, { driveFolderId: folderId, driveRootId: rootId });
+      const existing = await getFile(getAccessToken, folderId);
+      if (existing.trashed) {
+        folderId = null;
+      } else if (existing.name !== expectedName) {
+        await renameFile(getAccessToken, folderId, expectedName);
+      }
+    } catch (error) {
+      if (error instanceof DriveApiError && error.status === 404) {
+        folderId = null;
       } else {
-        throw err;
+        throw error;
       }
     }
   }
 
-  // ── Step 2: build DOCX blob ──────────────────────────────────────────────
-  const blob = await generateDocxBlob(resumeData, sectionOrder);
-  const fileName = safeFileName(resume.name);
+  if (!folderId) {
+    const folders = await ensureGroupFolder(getAccessToken, expectedName);
+    folderId = folders.folderId;
+    rootId = folders.rootId;
+    try {
+      await updateGroupDriveFolder(group.id, { driveFolderId: folderId, driveRootId: rootId });
+    } catch (error) {
+      console.warn('[driveSync] Could not cache group folder id:', error);
+    }
+  }
 
-  // ── Step 3: upload or update ─────────────────────────────────────────────
+  return { folderId, rootId };
+}
+
+export async function syncResumeToDrive({ getAccessToken, group, resume, resumeData, sectionOrder }) {
+  if (!group?.id) throw new Error('Group is required to sync to Drive');
+  if (!resume?.id) throw new Error('Resume is required to sync to Drive');
+
+  const { folderId } = await ensureCurrentGroupFolder(getAccessToken, group);
+  const mirrorBlob = generateDriveMirrorHtmlBlob(resumeData, sectionOrder);
+  const fileName = safeFileName(resume.name);
   let fileId = resume.driveFileId;
   let webViewLink = resume.driveWebViewLink || null;
   let created = false;
 
   if (fileId) {
     try {
-      await updateDocxContent(getAccessToken, fileId, blob);
-    } catch (err) {
-      if (err instanceof DriveApiError && (err.status === 404 || err.status === 410)) {
-        // File was deleted from Drive — recreate
+      const existing = await getFile(getAccessToken, fileId);
+      if (existing.trashed) {
         fileId = null;
       } else {
-        throw err;
+        await updateHtmlContent(getAccessToken, fileId, mirrorBlob);
+        if (existing.name !== fileName) await renameFile(getAccessToken, fileId, fileName);
+        webViewLink = existing.webViewLink || webViewLink;
+      }
+    } catch (error) {
+      if (error instanceof DriveApiError && (error.status === 404 || error.status === 410)) {
+        fileId = null;
+      } else {
+        throw error;
       }
     }
   }
 
   if (!fileId) {
-    const uploaded = await uploadDocxAsGoogleDoc(getAccessToken, blob, fileName, folderId);
+    const uploaded = await uploadHtmlAsGoogleDoc(getAccessToken, mirrorBlob, fileName, folderId);
     fileId = uploaded.id;
     webViewLink = uploaded.webViewLink;
     created = true;
   }
 
-  // ── Step 4: persist metadata ─────────────────────────────────────────────
   await updateResumeDriveSync(resume.id, {
     driveFileId: fileId,
     driveFolderId: folderId,
     driveWebViewLink: webViewLink,
   });
-
   return { fileId, folderId, webViewLink, created };
 }
 
+async function runQueuedSync(initial) {
+  const queue = syncQueues.get(initial.resume.id);
+  let current = initial;
+  let lastDriveMetadata = {};
+  let result;
+
+  do {
+    queue.pending = null;
+    const group = await getResumeGroup(current.groupId);
+    result = await syncResumeToDrive({
+      ...current,
+      group,
+      resume: { ...current.resume, ...lastDriveMetadata },
+    });
+    lastDriveMetadata = {
+      driveFileId: result.fileId,
+      driveFolderId: result.folderId,
+      driveWebViewLink: result.webViewLink,
+    };
+    current = queue.pending;
+  } while (current);
+
+  return result;
+}
+
 /**
- * Convenience: fetch the group from Firestore then run syncResumeToDrive.
- * Useful when the caller only has a groupId.
+ * Serialize per-resume syncs and keep only the latest pending render. This
+ * prevents duplicate Google Docs when saves overlap during the first upload.
  */
-export async function syncResumeToDriveByIds({ getAccessToken, groupId, resume, resumeData, sectionOrder }) {
-  const group = await getResumeGroup(groupId);
-  return syncResumeToDrive({ getAccessToken, group, resume, resumeData, sectionOrder });
+export function syncResumeToDriveByIds(params) {
+  if (!params.resume?.id) return Promise.reject(new Error('Resume is required to sync to Drive'));
+  const existing = syncQueues.get(params.resume.id);
+  if (existing) {
+    existing.pending = params;
+    return existing.promise;
+  }
+
+  const queue = { pending: null, promise: null };
+  syncQueues.set(params.resume.id, queue);
+  queue.promise = runQueuedSync(params).finally(() => {
+    if (syncQueues.get(params.resume.id) === queue) syncQueues.delete(params.resume.id);
+  });
+  return queue.promise;
+}
+
+export async function drainDriveCleanup({ getAccessToken, userId }) {
+  const queued = await getDriveCleanupQueue(userId);
+  for (const item of queued) {
+    const fileId = item.fileId || item.id;
+    try {
+      await deleteFile(getAccessToken, fileId);
+    } catch (error) {
+      if (!(error instanceof DriveApiError) || (error.status !== 404 && error.status !== 410)) {
+        throw error;
+      }
+    }
+    await removeDriveCleanup(userId, fileId);
+  }
+  return queued.length;
 }

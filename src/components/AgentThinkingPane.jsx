@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Brain, CheckCircle2, AlertTriangle, Loader2, Pause, Play } from 'lucide-react';
 
+const ACTIVE_STATUSES = new Set([
+  'starting', 'thinking', 'writing', 'validating', 'repairing',
+  'repair-complete', 'persisting',
+]);
+
 /**
  * Live thinking / status pane for the streaming AI agent (Approach B).
  *
@@ -8,7 +13,7 @@ import { Brain, CheckCircle2, AlertTriangle, Loader2, Pause, Play } from 'lucide
  *   thoughts      string[]   accumulated thought-summary chunks (in order)
  *   answerPreview string     accumulated answer-JSON text so far
  *   usage         object?    latest { thoughtsTokens, candidatesTokens, totalTokens }
- *   status        string?    'idle' | 'thinking' | 'writing' | 'validating' | 'done' | 'error'
+ *   status        string?    current streaming-agent stage
  *   elapsedMs     number?
  *   validator     { ok, issues[] } | null
  *   model         string?
@@ -34,13 +39,20 @@ const AgentThinkingPane = ({
   }, [thoughts, autoScroll]);
 
   const elapsedSec = Math.floor(elapsedMs / 1000);
-  const isActive = status === 'thinking' || status === 'writing' || status === 'validating';
+  const isActive = ACTIVE_STATUSES.has(status);
 
   const statusLabel = {
     idle: 'Idle',
+    starting: 'Starting...',
     thinking: 'Thinking…',
     writing: 'Writing resume…',
     validating: 'Validating…',
+    repairing: 'Improving draft...',
+    'repair-complete': 'Finishing repair...',
+    persisting: 'Saving resume...',
+    'review-required': 'Review required',
+    truncated: 'Review required',
+    'aborted-repetition': 'Stopped repetitive output',
     done: 'Done',
     error: 'Failed',
   }[status] || status;
@@ -102,7 +114,7 @@ const AgentThinkingPane = ({
         )}
         {validator && !validator.ok && (
           <div className="mt-3 p-3 rounded border border-amber-200 bg-amber-50 text-amber-800 text-xs font-sans">
-            <p className="font-semibold mb-1">Truthfulness check failed:</p>
+            <p className="font-semibold mb-1">Resume validation needs review:</p>
             <ul className="list-disc list-inside space-y-0.5">
               {validator.issues.slice(0, 8).map((iss, i) => <li key={i}>{iss}</li>)}
             </ul>
@@ -110,7 +122,7 @@ const AgentThinkingPane = ({
         )}
         {validator && validator.ok && status === 'done' && (
           <div className="mt-3 p-3 rounded border border-green-200 bg-green-50 text-green-700 text-xs font-sans flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4" /> Output passed the truthfulness check.
+            <CheckCircle2 className="w-4 h-4" /> Resume validation passed.
           </div>
         )}
       </div>

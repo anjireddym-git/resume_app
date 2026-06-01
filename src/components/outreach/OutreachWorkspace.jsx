@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   Sparkles, Send, Inbox, Bell, FileText, Settings,
 } from 'lucide-react';
 import useOutreachCounts from '../../hooks/useOutreachCounts';
+import useGmailReplySync from '../../hooks/useGmailReplySync';
 import ComposeView from './ComposeView';
 import SentView from './SentView';
 import RepliesView from './RepliesView';
@@ -24,7 +25,10 @@ const OutreachWorkspace = ({ user, onResumeCreated }) => {
   // Selected sentApplication shown in SentView detail panel. Set when a reply
   // row is clicked in RepliesView and we want to jump to the application.
   const [selectedAppId, setSelectedAppId] = useState(null);
+  const [replySyncVersion, setReplySyncVersion] = useState(0);
   const counts = useOutreachCounts();
+  const handleRepliesSynced = useCallback(() => setReplySyncVersion((version) => version + 1), []);
+  useGmailReplySync(handleRepliesSynced);
 
   const openApplication = (id) => {
     setSelectedAppId(id);
@@ -85,6 +89,7 @@ const OutreachWorkspace = ({ user, onResumeCreated }) => {
           <SentView
             user={user}
             selectedAppId={selectedAppId}
+            refreshKey={replySyncVersion}
             onSelect={setSelectedAppId}
             onCompose={() => setView('compose')}
           />

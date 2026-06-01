@@ -186,11 +186,17 @@ const FileBrowser = ({
     const ancestorIds = collectAncestorIds(selectedResumeId, resumes);
     if (ancestorIds.length === 0) return;
 
-    setExpandedGroups((prev) => ({
-      ...prev,
-      [selectedGroupId]: true,
-    }));
+    // Return `prev` unchanged when the expansion state is already correct.
+    // Spreading a new object (even with the same values) changes the reference,
+    // which triggers the group-load effect → loadResumesForGroup → setGroupResumes
+    // (new ref) → this effect again → infinite loop of Firestore channel calls.
+    setExpandedGroups((prev) => {
+      if (prev[selectedGroupId]) return prev; // already expanded, no-op
+      return { ...prev, [selectedGroupId]: true };
+    });
     setExpandedResumes((prev) => {
+      const anyNew = ancestorIds.some((id) => !prev[id]);
+      if (!anyNew) return prev; // nothing new to expand, no-op
       const next = { ...prev };
       for (const id of ancestorIds) next[id] = true;
       return next;

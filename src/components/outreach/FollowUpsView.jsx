@@ -2,16 +2,18 @@ import React, { useEffect, useState } from 'react';
 import { Loader2, Bell, Send, Clock, AlertTriangle, BellOff, CheckCircle2, Sparkles, ExternalLink } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  getUnseenNotifications,
+  subscribeToUnseenNotifications,
   markNotificationSeen,
   getSentApplication,
+  getFollowUpDraftContext,
   snoozeFollowUp,
   setFollowUpEnabled,
   recordFollowUpSent,
   getUserSettings,
+  listEmailTemplates,
 } from '../../services/resumeService';
 import { geminiService } from '../../services/geminiService';
-import { sendGmail, GmailAuthError } from '../../services/gmailService';
+import { sendGmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
 
 const FollowUpsView = ({ user, onOpenApplication }) => {
   const { ensureGmailAccess } = useAuth();
@@ -21,35 +23,75 @@ const FollowUpsView = ({ user, onOpenApplication }) => {
   const [busyId, setBusyId] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [settings, setSettings] = useState(null);
+  const [templates, setTemplates] = useState([]);
 
-  const load = async () => {
-    if (!user?.uid) return;
+  useEffect(() => {
+    if (!user?.uid) return undefined;
     setLoading(true); setError('');
-    try {
-      const ns = await getUnseenNotifications(user.uid, 100);
-      setItems(ns.filter((n) => n.type === 'follow-up-due'));
-    } catch (err) { setError(err.message || 'Failed to load follow-ups.'); }
-    finally { setLoading(false); }
-  };
+    return subscribeToUnseenNotifications(
+      user.uid,
+      (ns) => {
+        setItems(ns.filter((n) => n.type === 'follow-up-due'));
+        setLoading(false);
+      },
+      (err) => {
+        setError(err.message || 'Failed to load follow-ups.');
+        setLoading(false);
+      },
+      100,
+    );
+  }, [user?.uid]);
+  useEffect(() => {
+    if (!user?.uid) return;
+    Promise.all([getUserSettings(user.uid), listEmailTemplates(user.uid)])
+      .then(([nextSettings, nextTemplates]) => {
+        setSettings(nextSettings);
+        setTemplates(nextTemplates);
+      })
+      .catch(() => {});
+  }, [user?.uid]);
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [user?.uid]);
-  useEffect(() => { if (user?.uid) getUserSettings(user.uid).then(setSettings).catch(() => {}); }, [user?.uid]);
+  const applyTemplate = (notificationId, templateId) => {
+    const template = templates.find((item) => item.id === templateId);
+    if (!template) return;
+    setDrafts((current) => {
+      const draft = current[notificationId];
+      if (!draft) return current;
+      let body = template.body || draft.body;
+      if (settings?.signature && !body.includes(settings.signature)) {
+        body = `${body.trimEnd()}\n\n—\n${settings.signature}\n`;
+      }
+      return {
+        ...current,
+        [notificationId]: {
+          ...draft,
+          subject: template.subject || draft.subject,
+          body,
+        },
+      };
+    });
+  };
 
   const handleDraft = async (notif) => {
     setBusyId(notif.id); setError('');
     try {
       const app = await getSentApplication(notif.sentApplicationId);
+      const context = await getFollowUpDraftContext(app);
       const draft = await geminiService.draftFollowUpEmail(
-        { subject: app.subject, body: app.body },
+        context,
         app.jobDescription || '',
         null,
-        Math.max(1, Math.floor((Date.now() - (app.sentAt?.toMillis?.() || Date.now())) / 86400000)),
       );
       let body = draft.body || '';
       if (settings?.signature && !body.includes(settings.signature)) {
         body = `${body.trimEnd()}\n\n—\n${settings.signature}\n`;
       }
-      setDrafts((d) => ({ ...d, [notif.id]: { subject: draft.subject, body, app } }));
+      setDrafts((d) => ({ ...d, [notif.id]: {
+        subject: draft.subject,
+        body,
+        app,
+        latestMessageIdHeader: context.latestMessageIdHeader,
+      } }));
     } catch (err) {
       console.error(err); setError(err.message || 'Failed to draft follow-up.');
     } finally { setBusyId(null); }
@@ -61,7 +103,7 @@ const FollowUpsView = ({ user, onOpenApplication }) => {
     setBusyId(notif.id); setError('');
     try {
       const accessToken = await ensureGmailAccess({ withReadonly: false });
-      await sendGmail({
+      const sendResp = await sendGmail({
         accessToken,
         fromEmail: user.email,
         fromName: user.displayName || undefined,
@@ -69,9 +111,20 @@ const FollowUpsView = ({ user, onOpenApplication }) => {
         cc: app.cc || [], bcc: app.bcc || [],
         subject: draft.subject, body: draft.body,
         threadId: app.gmailThreadId,
-        inReplyTo: app.gmailMessageIdHeader,
+        inReplyTo: draft.latestMessageIdHeader || app.gmailMessageIdHeader,
       });
-      await recordFollowUpSent(notif.sentApplicationId);
+      const messageIdHeader = await getMessageIdHeader(accessToken, sendResp.id);
+      await recordFollowUpSent(notif.sentApplicationId, {
+        gmailMessageId: sendResp.id,
+        gmailMessageIdHeader: messageIdHeader,
+        gmailThreadId: sendResp.threadId,
+        from: user.email,
+        to: app.recipientEmail,
+        cc: app.cc || [],
+        bcc: app.bcc || [],
+        subject: draft.subject,
+        body: draft.body,
+      });
       await markNotificationSeen(notif.id);
       setItems((arr) => arr.filter((x) => x.id !== notif.id));
       setDrafts((d) => { const { [notif.id]: _, ...rest } = d; return rest; });
@@ -158,6 +211,21 @@ const FollowUpsView = ({ user, onOpenApplication }) => {
                   </div>
                 ) : (
                   <div className="space-y-2 border-t border-neutral-100 pt-3">
+                    {templates.length > 0 && (
+                      <select
+                        defaultValue=""
+                        onChange={(e) => {
+                          if (e.target.value) applyTemplate(n.id, e.target.value);
+                          e.target.value = '';
+                        }}
+                        className="h-8 px-2 text-xs border border-neutral-200 rounded-lg focus:outline-none focus:border-neutral-400 bg-white"
+                      >
+                        <option value="">Insert template...</option>
+                        {templates.map((template) => (
+                          <option key={template.id} value={template.id}>{template.name}</option>
+                        ))}
+                      </select>
+                    )}
                     <input
                       value={draft.subject}
                       onChange={(e) => setDrafts((d) => ({ ...d, [n.id]: { ...d[n.id], subject: e.target.value } }))}

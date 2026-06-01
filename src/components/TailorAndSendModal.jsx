@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  X, Loader2, Sparkles, Send, FileText, ChevronRight, ChevronLeft,
-  CheckCircle2, AlertTriangle, Paperclip, Bell, Mail, ExternalLink, RefreshCw,
+  X, Loader2, Send, FileText, ChevronRight, ChevronLeft,
+  CheckCircle2, AlertTriangle, Paperclip, Bell, ExternalLink, RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useCredits } from '../contexts/CreditsContext';
@@ -10,7 +10,6 @@ import {
   getResumeGroup,
   getResume,
   buildFullResume,
-  compactResumeSummary,
   createGeneratedResume,
   logSentApplication,
   updateResumeMatchAnalysis,
@@ -23,7 +22,7 @@ import { analyticsService } from '../services/analyticsService';
 /**
  * Five-step flow:
  *   1. paste JD
- *   2. AI picks best base resume (user can override)
+ *   2. user picks the base resume
  *   3. tailor resume → saved as new version + match analysis
  *   4. AI drafts recruiter email (To/CC/BCC/Subject/Body editable)
  *   5. send via user's Gmail account; optional follow-up scheduling
@@ -47,7 +46,6 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
   // Step 2
   const [allResumes, setAllResumes] = useState([]);
   const [loadingResumes, setLoadingResumes] = useState(false);
-  const [aiPick, setAiPick] = useState(null); // { resumeId, reasoning, score, ranking }
   const [selectedBaseId, setSelectedBaseId] = useState(null);
   const [baseFullResume, setBaseFullResume] = useState(null);
   const [baseGroup, setBaseGroup] = useState(null);
@@ -81,7 +79,6 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
     setBusy(false);
     setJobDescription('');
     setAllResumes([]);
-    setAiPick(null);
     setSelectedBaseId(null);
     setBaseFullResume(null);
     setBaseGroup(null);
@@ -106,7 +103,7 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
   const handleSubmitJD = async () => {
     if (!jobDescription.trim()) { setError('Paste a job description to continue.'); return; }
     if (!hasCredits || credits < 2) {
-      setError('You need at least 2 credits for this flow (resume tailor + email draft). Pick best resume is free.');
+      setError('You need at least 2 credits for this flow (resume tailor + email draft).');
       return;
     }
     setError('');
@@ -121,25 +118,10 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
         return;
       }
       setAllResumes(resumes);
-
-      // Build compact summaries for the AI.
-      const summaries = [];
-      const groupCache = new Map();
-      for (const r of resumes.slice(0, 25)) {  // hard-cap to keep tokens sane
-        let group = groupCache.get(r.groupId);
-        if (!group) {
-          try { group = await getResumeGroup(r.groupId); groupCache.set(r.groupId, group); }
-          catch { continue; }
-        }
-        const full = buildFullResume(group, r);
-        summaries.push(compactResumeSummary(r, full));
-      }
-      const pick = await geminiService.pickBestResume(summaries, jobDescription);
-      setAiPick(pick);
-      setSelectedBaseId(pick.resumeId);
+      setSelectedBaseId(null);
     } catch (err) {
       console.error(err);
-      setError(err.message || 'Failed to pick best resume.');
+      setError(err.message || 'Failed to load your resumes.');
       setStep('jd');
     } finally {
       setLoadingResumes(false);
@@ -324,7 +306,7 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
   const stepIndex = STEPS.indexOf(step);
   const stepLabel = {
     jd: 'Paste the job description',
-    pickBase: 'Pick the best base resume',
+    pickBase: 'Choose a base resume',
     tailor: 'Tailoring your resume…',
     email: 'Review the recruiter email',
     send: 'Sending…',
@@ -374,7 +356,7 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
                 className="w-full h-64 p-3 text-sm border border-neutral-200 rounded-lg resize-none focus:outline-none focus:border-neutral-400"
               />
               <p className="text-xs text-neutral-500">
-                Uses 2 credits: 1 to tailor the resume and 1 to draft the recruiter email. Picking the best base resume costs 1 extra credit.
+                Uses 2 credits: 1 to tailor the resume and 1 to draft the recruiter email. You choose the base resume next.
               </p>
             </div>
           )}
@@ -385,21 +367,10 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
                 <div className="py-8 text-center"><Loader2 className="w-6 h-6 text-neutral-400 animate-spin mx-auto" /></div>
               ) : (
                 <>
-                  {aiPick && (
-                    <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                      <div className="flex items-center gap-2 text-sm font-medium text-blue-900">
-                        <Sparkles className="w-4 h-4" /> AI pick (score {aiPick.score}/100)
-                      </div>
-                      <p className="text-xs text-blue-800 mt-1">{aiPick.reasoning}</p>
-                    </div>
-                  )}
                   <label className="text-sm font-medium text-neutral-700">Choose base resume</label>
                   <div className="space-y-2 max-h-[320px] overflow-y-auto">
-                    {(aiPick?.ranking || allResumes.map((r) => ({ resumeId: r.id, score: null }))).map((rk) => {
-                      const r = allResumes.find((x) => x.id === rk.resumeId);
-                      if (!r) return null;
+                    {allResumes.map((r) => {
                       const isSelected = selectedBaseId === r.id;
-                      const isAiPick = aiPick?.resumeId === r.id;
                       return (
                         <button
                           key={r.id}
@@ -412,11 +383,9 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="text-sm font-medium text-neutral-900 truncate">{r.name}</span>
-                              {isAiPick && <span className="text-[10px] bg-blue-600 text-white px-1.5 py-0.5 rounded">AI PICK</span>}
                             </div>
                             <div className="text-xs text-neutral-500 truncate">
-                              {r.matchScore != null && <span>stored match {r.matchScore}% · </span>}
-                              {rk.score != null && <span>fit {rk.score}/100</span>}
+                              {r.matchScore != null ? `Stored match ${r.matchScore}%` : 'Ready to tailor for this job'}
                             </div>
                           </div>
                         </button>
@@ -609,8 +578,8 @@ const TailorAndSendModal = ({ isOpen, onClose, currentResume, onResumeCreated })
               disabled={busy || !jobDescription.trim()}
               className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
             >
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              Find best resume
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+              Choose resume
             </button>
           )}
           {step === 'pickBase' && (

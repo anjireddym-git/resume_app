@@ -5,6 +5,7 @@ import { httpsCallable } from 'firebase/functions';
 import { db, functions } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { markReplySeen } from '../services/resumeService';
+import { formatGmailWatchError } from '../services/gmailService';
 
 const fetchGmailHistoryFn = httpsCallable(functions, 'fetchGmailHistory');
 const startGmailWatchFn = httpsCallable(functions, 'startGmailWatch');
@@ -41,7 +42,9 @@ const RepliesInbox = ({ isOpen, onClose }) => {
     (async () => {
       try {
         const accessToken = await ensureGmailAccess({ withReadonly: true });
-        await fetchGmailHistoryFn({ accessToken, sinceHistoryId: pendingHistoryId });
+        // pendingHistoryId is the newest Pub/Sub marker. Fetch from the
+        // previously stored watch.historyId so the triggering reply is included.
+        await fetchGmailHistoryFn({ accessToken });
         await loadReplies();
       } catch (err) {
         console.warn('history fetch failed:', err.message);
@@ -58,6 +61,7 @@ const RepliesInbox = ({ isOpen, onClose }) => {
       // Reply subdocs are under sentApplications/*/replies. Use a collection group.
       const q = query(
         collectionGroup(db, 'replies'),
+        where('userId', '==', user.uid),
         orderBy('receivedAt', 'desc'),
         limit(50),
       );
@@ -89,7 +93,7 @@ const RepliesInbox = ({ isOpen, onClose }) => {
       setWatchEnabled(true);
     } catch (err) {
       console.error(err);
-      setError(err.message || 'Failed to enable reply tracking.');
+      setError(formatGmailWatchError(err));
     }
   };
 
@@ -97,7 +101,7 @@ const RepliesInbox = ({ isOpen, onClose }) => {
     setError('');
     try {
       const accessToken = await ensureGmailAccess({ withReadonly: true });
-      await fetchGmailHistoryFn({ accessToken });
+      await fetchGmailHistoryFn({ accessToken, backfillThreads: true });
       await loadReplies();
     } catch (err) {
       console.error(err);

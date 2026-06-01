@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { Loader2, Inbox, Mail, ExternalLink, RefreshCw, AlertTriangle } from 'lucide-react';
-import { doc, onSnapshot, collectionGroup, query, orderBy, getDocs, limit } from 'firebase/firestore';
+import { doc, onSnapshot, collectionGroup, query, where, orderBy, getDocs, limit } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions } from '../../lib/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { markReplySeen } from '../../services/resumeService';
+import { formatGmailWatchError } from '../../services/gmailService';
 
 const fetchGmailHistoryFn = httpsCallable(functions, 'fetchGmailHistory');
 const startGmailWatchFn = httpsCallable(functions, 'startGmailWatch');
@@ -21,7 +22,6 @@ const RepliesView = ({ user, onOpenApplication }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [watchEnabled, setWatchEnabled] = useState(false);
-  const [pendingHistoryId, setPendingHistoryId] = useState(null);
 
   useEffect(() => {
     if (!user?.uid) return undefined;
@@ -29,7 +29,6 @@ const RepliesView = ({ user, onOpenApplication }) => {
       const data = snap.data() || {};
       const watch = data.gmailWatch || {};
       setWatchEnabled(!!watch.enabledAt);
-      setPendingHistoryId(watch.pendingHistoryFetch || null);
     });
     return unsub;
   }, [user?.uid]);
@@ -38,7 +37,12 @@ const RepliesView = ({ user, onOpenApplication }) => {
     if (!user?.uid) return;
     setLoading(true); setError('');
     try {
-      const q = query(collectionGroup(db, 'replies'), orderBy('receivedAt', 'desc'), limit(100));
+      const q = query(
+        collectionGroup(db, 'replies'),
+        where('userId', '==', user.uid),
+        orderBy('receivedAt', 'desc'),
+        limit(100),
+      );
       const snap = await getDocs(q);
       const rows = [];
       snap.forEach((d) => {
@@ -53,32 +57,20 @@ const RepliesView = ({ user, onOpenApplication }) => {
 
   useEffect(() => { loadReplies(); /* eslint-disable-next-line */ }, [user?.uid]);
 
-  useEffect(() => {
-    if (!pendingHistoryId) return;
-    (async () => {
-      try {
-        const accessToken = await ensureGmailAccess({ withReadonly: true });
-        await fetchGmailHistoryFn({ accessToken, sinceHistoryId: pendingHistoryId });
-        await loadReplies();
-      } catch (err) { console.warn('history fetch failed:', err.message); }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingHistoryId]);
-
   const enableReplyTracking = async () => {
     setError('');
     try {
       const accessToken = await ensureGmailAccess({ withReadonly: true });
       await startGmailWatchFn({ accessToken });
       setWatchEnabled(true);
-    } catch (err) { console.error(err); setError(err.message || 'Failed to enable reply tracking.'); }
+    } catch (err) { console.error(err); setError(formatGmailWatchError(err)); }
   };
 
   const refreshNow = async () => {
     setError('');
     try {
       const accessToken = await ensureGmailAccess({ withReadonly: true });
-      await fetchGmailHistoryFn({ accessToken });
+      await fetchGmailHistoryFn({ accessToken, backfillThreads: true });
       await loadReplies();
     } catch (err) { setError(err.message || 'Refresh failed.'); }
   };

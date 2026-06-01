@@ -195,27 +195,6 @@ class AIService {
   }
 
   /**
-   * Pick the best base resume for a given JD from a list of compact summaries.
-   * Each summary: { id, name, headline, summary, topSkills, lastRole }
-   */
-  async pickBestResume(resumeSummaries, jobDescription) {
-    try {
-      const result = await this.callAI({
-        action: 'pickBestResume',
-        data: { resumeSummaries, jobDescription },
-      });
-      if (!result.data?.success) throw new Error(result.data?.error || 'AI processing failed');
-      return result.data.data;
-    } catch (error) {
-      console.error('Error picking best resume:', error);
-      if (error.code === 'functions/resource-exhausted') {
-        throw new Error('Insufficient credits. Please purchase more credits to continue.');
-      }
-      throw new Error(error.message || 'Failed to pick best resume');
-    }
-  }
-
-  /**
    * Draft a recruiter outreach email tailored to a JD + tailored resume.
    * Returns { recipientEmail, recipientName, subject, body, confidence }.
    */
@@ -236,14 +215,12 @@ class AIService {
     }
   }
 
-  /**
-   * Draft a follow-up email keeping context from the original outreach.
-   */
-  async draftFollowUpEmail(originalEmail, jobDescription, tailoredResume, daysSince) {
+  /** Draft the next email using the latest chronological Gmail thread context. */
+  async draftFollowUpEmail({ originalEmail, threadMessages = [], timingContext = {} }, jobDescription, tailoredResume = null) {
     try {
       const result = await this.callAI({
         action: 'draftFollowUpEmail',
-        data: { originalEmail, jobDescription, tailoredResume, daysSince },
+        data: { originalEmail, jobDescription, tailoredResume, threadMessages, timingContext },
       });
       if (!result.data?.success) throw new Error(result.data?.error || 'AI processing failed');
       return result.data.data;

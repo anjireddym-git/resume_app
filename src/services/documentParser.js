@@ -48,7 +48,6 @@ export async function extractResumeFromFile(geminiService, file) {
       data: {
         base64Data,
         mimeType,
-        model: 'gemini-2.5-pro',
       }
     });
 

@@ -25,7 +25,8 @@ const GoogleDocsPreview = ({ fileId, mode = 'preview', onSync, isSyncing = false
           Not synced to Google Drive yet
         </h3>
         <p className="text-sm text-neutral-500 max-w-sm mb-6">
-          Sync this resume to your Google Drive to view and edit it as a live Google Doc here.
+          Publish an app-managed Google Docs copy of this resume. The app remains
+          the source of truth and republishes your saved changes.
         </p>
         {onSync && (
           <button
@@ -49,7 +50,7 @@ const GoogleDocsPreview = ({ fileId, mode = 'preview', onSync, isSyncing = false
       <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-3 py-2 bg-white/95 backdrop-blur border-b border-neutral-200">
         <div className="text-xs text-neutral-500 flex items-center gap-1.5">
           <Cloud className="w-3.5 h-3.5" />
-          <span>{mode === 'edit' ? 'Editing in Google Docs' : 'Live Google Doc preview'}</span>
+          <span>{mode === 'edit' ? 'Google Docs managed copy' : 'Managed Google Docs copy'}</span>
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -86,6 +87,9 @@ const GoogleDocsPreview = ({ fileId, mode = 'preview', onSync, isSyncing = false
         onLoad={() => setLoaded(true)}
         allow="autoplay"
       />
+      <div className="absolute bottom-0 left-0 right-0 px-3 py-1.5 bg-amber-50/95 border-t border-amber-100 text-[10px] text-amber-800">
+        Edits made directly in Google Docs are not imported. Saving in this app republishes the managed copy.
+      </div>
     </div>
   );
 };
