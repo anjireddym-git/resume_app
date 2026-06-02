@@ -580,7 +580,7 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
       <Section title="Experience" count={data.experience?.length || 0}>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 italic">Edit via "Edit Shared"</span>
+            <span className="text-xs text-neutral-400 italic">Shared timeline; title edits save to this resume</span>
             <FormatSelector
               sectionId="experience"
               currentFormat={getFormat('experience')}

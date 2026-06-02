@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ExternalLink, Cloud, Loader2, RefreshCw } from 'lucide-react';
 import { getEmbedPreviewUrl, getEmbedEditUrl, getOpenInDocsUrl } from '../services/googleDriveService';
 
@@ -10,10 +10,27 @@ import { getEmbedPreviewUrl, getEmbedEditUrl, getOpenInDocsUrl } from '../servic
  *   mode           – 'preview' (read-only) or 'edit' (full Docs editor in iframe).
  *   onSync         – optional callback invoked when the user clicks "Sync now" in the empty state.
  *   isSyncing      – external syncing-in-progress flag (shows spinner).
+ *   refreshToken   – change this value to force iframe reload after remote content updates.
  */
-const GoogleDocsPreview = ({ fileId, mode = 'preview', onSync, isSyncing = false }) => {
+const GoogleDocsPreview = ({
+  fileId,
+  mode = 'preview',
+  onSync,
+  isSyncing = false,
+  refreshToken = 0,
+  emptyTitle = 'Not synced to Google Drive yet',
+  emptyDescription = 'Publish an app-managed Google Docs copy of this resume.',
+  showFooterNotice = true,
+  footerNotice = 'Edits made directly in Google Docs are not imported. Saving in this app republishes the managed copy.',
+}) => {
   const [iframeKey, setIframeKey] = useState(0);
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!fileId) return;
+    setLoaded(false);
+    setIframeKey((key) => key + 1);
+  }, [fileId, mode, refreshToken]);
 
   if (!fileId) {
     return (
@@ -22,11 +39,10 @@ const GoogleDocsPreview = ({ fileId, mode = 'preview', onSync, isSyncing = false
           <Cloud className="w-8 h-8 text-blue-600" />
         </div>
         <h3 className="text-lg font-semibold text-neutral-800 mb-2">
-          Not synced to Google Drive yet
+          {emptyTitle}
         </h3>
         <p className="text-sm text-neutral-500 max-w-sm mb-6">
-          Publish an app-managed Google Docs copy of this resume. The app remains
-          the source of truth and republishes your saved changes.
+          {emptyDescription}
         </p>
         {onSync && (
           <button
@@ -50,7 +66,7 @@ const GoogleDocsPreview = ({ fileId, mode = 'preview', onSync, isSyncing = false
       <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-3 py-2 bg-white/95 backdrop-blur border-b border-neutral-200">
         <div className="text-xs text-neutral-500 flex items-center gap-1.5">
           <Cloud className="w-3.5 h-3.5" />
-          <span>{mode === 'edit' ? 'Google Docs managed copy' : 'Managed Google Docs copy'}</span>
+          <span>{mode === 'edit' ? 'Google Docs editor' : 'Managed Google Docs copy'}</span>
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -80,16 +96,18 @@ const GoogleDocsPreview = ({ fileId, mode = 'preview', onSync, isSyncing = false
       )}
 
       <iframe
-        key={iframeKey}
+        key={`${fileId}-${mode}-${iframeKey}`}
         src={src}
-        title="Google Docs preview"
+        title={mode === 'edit' ? 'Google Docs editor' : 'Google Docs preview'}
         className="w-full h-full pt-10 border-0"
         onLoad={() => setLoaded(true)}
         allow="autoplay"
       />
-      <div className="absolute bottom-0 left-0 right-0 px-3 py-1.5 bg-amber-50/95 border-t border-amber-100 text-[10px] text-amber-800">
-        Edits made directly in Google Docs are not imported. Saving in this app republishes the managed copy.
-      </div>
+      {showFooterNotice && footerNotice && (
+        <div className="absolute bottom-0 left-0 right-0 px-3 py-1.5 bg-amber-50/95 border-t border-amber-100 text-[10px] text-amber-800">
+          {footerNotice}
+        </div>
+      )}
     </div>
   );
 };

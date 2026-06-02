@@ -1,11 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useMemo, useState, useRef } from 'react';
 import { X, Upload, Loader2, FileText, ArrowLeft, ArrowRight, Check } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { createResumeGroup, createResume } from '../services/resumeService';
 import { extractResumeFromFile } from '../services/documentParser';
 import { geminiService } from '../services/geminiService';
 import ThemeEditor from './ThemeEditor';
-import ClassicTemplate from '../templates/ClassicTemplate';
+import GeneratedDocxPreview from './GeneratedDocxPreview';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 import { buildSectionOrder, buildCustomSectionDefs, buildCustomSectionsMap } from '../services/layoutExtractionService';
 import { normalizeSummaryToPoints } from '../lib/summaryUtils';
@@ -123,6 +123,16 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
     setError('');
     onClose();
   };
+
+  const designRenderOptions = useMemo(() => {
+    const sectionOrder = resumeData ? buildSectionOrder(resumeData) : undefined;
+    return {
+      sectionOrder,
+      visibleSections: sectionOrder,
+      themeConfig,
+      customSectionDefs: resumeData ? buildCustomSectionDefs(resumeData) : [],
+    };
+  }, [resumeData, themeConfig]);
 
   if (!isOpen) return null;
 
@@ -271,7 +281,7 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
                 
                 {/* Preview Pane */}
                 <div className="flex-1 bg-neutral-100 rounded-lg overflow-auto border border-neutral-200">
-                  <ClassicTemplate resumeData={resumeData} isEditMode={false} />
+                  <GeneratedDocxPreview resumeData={resumeData} renderOptions={designRenderOptions} />
                 </div>
               </div>
 

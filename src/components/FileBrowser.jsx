@@ -29,79 +29,13 @@ import {
   updateResume
 } from '../services/resumeService';
 import ConfirmDialog from './ConfirmDialog';
-
-const ROOT_PARENT_ID = '__root__';
-
-function toMillis(value) {
-  const date = value?.toDate?.() || (value ? new Date(value) : null);
-  return Number.isFinite(date?.getTime?.()) ? date.getTime() : 0;
-}
-
-function sortResumes(resumes) {
-  return [...resumes].sort((a, b) => {
-    const timeDiff = toMillis(b.updatedAt) - toMillis(a.updatedAt);
-    if (timeDiff !== 0) return timeDiff;
-    return (b.version || 0) - (a.version || 0);
-  });
-}
-
-function buildResumeTree(resumes) {
-  const childrenByParent = new Map();
-
-  for (const resume of resumes) {
-    const key = resume.parentResumeId || ROOT_PARENT_ID;
-    if (!childrenByParent.has(key)) childrenByParent.set(key, []);
-    childrenByParent.get(key).push(resume);
-  }
-
-  const buildNodes = (parentId = ROOT_PARENT_ID) => {
-    const children = sortResumes(childrenByParent.get(parentId) || []);
-    return children.map((resume) => ({
-      resume,
-      children: buildNodes(resume.id),
-    }));
-  };
-
-  return buildNodes();
-}
-
-function resumeMatchesSearch(resume, searchQuery) {
-  if (!searchQuery) return true;
-  const value = searchQuery.toLowerCase();
-  return [
-    resume.name,
-    resume.generationType,
-    resume.generationMeta?.sourceResumeName,
-    resume.generationMeta?.label,
-  ]
-    .filter(Boolean)
-    .some((text) => String(text).toLowerCase().includes(value));
-}
-
-function filterResumeTree(nodes, searchQuery) {
-  if (!searchQuery) return nodes;
-
-  return nodes.flatMap((node) => {
-    const children = filterResumeTree(node.children, searchQuery);
-    if (resumeMatchesSearch(node.resume, searchQuery) || children.length > 0) {
-      return [{ ...node, children }];
-    }
-    return [];
-  });
-}
-
-function collectAncestorIds(resumeId, resumes) {
-  const byId = new Map(resumes.map((resume) => [resume.id, resume]));
-  const ancestorIds = [];
-  let current = byId.get(resumeId);
-
-  while (current?.parentResumeId) {
-    ancestorIds.push(current.parentResumeId);
-    current = byId.get(current.parentResumeId);
-  }
-
-  return ancestorIds;
-}
+import {
+  buildResumeTree,
+  collectAncestorIds,
+  filterResumeTree,
+  resumeMatchesSearch,
+  sortResumes,
+} from '../lib/resumeTree';
 
 const FileBrowser = ({ 
   onSelectResume, 
@@ -318,10 +252,14 @@ const FileBrowser = ({
 
   const renderResumeShortcut = (resume, groupId) => {
     const isGenerated = !!resume.parentResumeId;
+    const resumeTitle = isGenerated && resume.generationMeta?.sourceResumeName
+      ? `${resume.name}\nFrom ${resume.generationMeta.sourceResumeName}`
+      : resume.name;
     return (
       <button
         key={`starred-${resume.id}`}
         onClick={() => onSelectResume(groupId, resume.id)}
+        title={resumeTitle}
         className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-neutral-100 transition-colors ${
           selectedResumeId === resume.id ? 'bg-blue-50 text-blue-700' : ''
         }`}
@@ -349,6 +287,9 @@ const FileBrowser = ({
     const hasChildren = children.length > 0;
     const isGenerated = !!resume.parentResumeId;
     const isSelected = selectedResumeId === resume.id;
+    const resumeTitle = isGenerated && resume.generationMeta?.sourceResumeName
+      ? `${resume.name}\nFrom ${resume.generationMeta.sourceResumeName}`
+      : resume.name;
 
     return (
       <div key={resume.id}>
@@ -357,6 +298,7 @@ const FileBrowser = ({
             isSelected ? 'bg-blue-50 text-blue-700' : ''
           }`}
           onClick={() => onSelectResume(groupId, resume.id)}
+          title={resumeTitle}
           style={{ paddingLeft: `${12 + depth * 18}px`, paddingRight: '12px' }}
         >
           {hasChildren ? (
@@ -522,6 +464,7 @@ const FileBrowser = ({
                     selectedGroupId === group.id && !selectedResumeId ? 'bg-neutral-100' : ''
                   }`}
                   onClick={() => toggleGroup(group.id)}
+                  title={group.name}
                 >
                   {expandedGroups[group.id] ? (
                     <ChevronDown className="w-4 h-4 text-neutral-400 flex-shrink-0" />

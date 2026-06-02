@@ -2,10 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { X, Loader2, Check, Sparkles, FileText, Search } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useCredits } from '../contexts/CreditsContext';
-import { createResume, getResumesInGroup, getResume, buildFullResume } from '../services/resumeService';
+import { createGeneratedResume, getResumesInGroup, getResume, buildFullResume } from '../services/resumeService';
 import { geminiService } from '../services/geminiService';
 import { analyticsService } from '../services/analyticsService';
 import { PREDEFINED_ROLES } from '../config/predefinedRoles';
+
+const AGENT_FIELDS = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'];
+const AUTO_POPULATE_AGENT_CREDITS_PER_RESUME = 5;
 
 const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
   const { user } = useAuth();
@@ -18,6 +21,7 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
   const [resumes, setResumes] = useState([]);
   const [loadingResumes, setLoadingResumes] = useState(false);
   const [selectedSourceId, setSelectedSourceId] = useState(null);
+  const [sourceResumeRecord, setSourceResumeRecord] = useState(null);
   const [sourceResumeData, setSourceResumeData] = useState(null);
   
   // Search states
@@ -75,6 +79,7 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
     try {
       const resume = await getResume(selectedSourceId);
       const fullResumeData = buildFullResume(group, resume);
+      setSourceResumeRecord(resume);
       setSourceResumeData(fullResumeData);
       setStep('select');
     } catch (err) {
@@ -104,8 +109,9 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
       return;
     }
 
-    if (credits < selectedRoles.length) {
-      setError(`Insufficient credits. Need ${selectedRoles.length} credits.`);
+    const requiredCredits = selectedRoles.length * AUTO_POPULATE_AGENT_CREDITS_PER_RESUME;
+    if (credits < requiredCredits) {
+      setError(`Insufficient credits. Need ${requiredCredits} credits.`);
       analyticsService.trackLowCreditsWarning(credits);
       return;
     }
@@ -126,6 +132,10 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
     });
 
     try {
+      let successCount = 0;
+      let failureCount = 0;
+      const failedTitles = [];
+
       for (let i = 0; i < itemsToGenerate.length; i++) {
         const item = itemsToGenerate[i];
         
@@ -138,21 +148,45 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
         }));
 
         try {
-          const transformedResume = await geminiService.transformResumeForRole(sourceResumeData, item.prompt);
-          
-          await createResume(user.uid, group.id, {
-            name: item.title,
-            summary: transformedResume.summary || sourceResumeData.summary || '',
-            experience: (transformedResume.experience || sourceResumeData.experience || []).map(exp => ({
-              highlights: exp.highlights || [],
-              environment: exp.environment || '',
-            })),
-            skills: transformedResume.skills || sourceResumeData.skills || {},
-            projects: transformedResume.projects || sourceResumeData.projects || [],
-            certifications: transformedResume.certifications || sourceResumeData.certifications || [],
-            internships: transformedResume.internships || sourceResumeData.internships || [],
-            hackathons: transformedResume.hackathons || sourceResumeData.hackathons || [],
-          });
+          const final = await geminiService.streamResumeAgent(
+            sourceResumeData,
+            item.prompt,
+            AGENT_FIELDS,
+            () => {},
+            {
+              sourceResumeId: sourceResumeRecord?.id || selectedSourceId,
+              mode: 'transform',
+              label: `Auto Populate - ${item.title}`,
+              targetResumeName: item.title,
+            },
+          );
+          const transformedResume = final?.resume;
+          if (!transformedResume) {
+            throw new Error(final?.error || 'AI returned an empty transformed resume.');
+          }
+          if (final?.validator?.ok === false) {
+            throw new Error(`AI output needs review: ${(final.validator.issues || []).slice(0, 3).join('; ')}`);
+          }
+
+          if (!final?.newResumeId) {
+            console.warn('[AutoPopulate] Streaming agent did not persist; falling back to client save.');
+            await createGeneratedResume(user.uid, sourceResumeRecord || { id: selectedSourceId, groupId: group.id, name: 'Source Resume' }, transformedResume, {
+              mode: 'transform',
+              name: item.title,
+              jobDescription: item.prompt,
+              fieldsToUpdate: AGENT_FIELDS,
+              label: `Auto Populate - ${item.title}`,
+              aiTrace: {
+                thoughts: final?.aiTrace?.thoughts || '',
+                usage: final?.usage || null,
+                model: final?.aiTrace?.model || '',
+                validator: final?.validator || null,
+                savedAt: new Date().toISOString(),
+              },
+              aiMetadata: final?.metadata || null,
+            });
+          }
+          successCount += 1;
 
           setGenerationProgress(prev => ({
             ...prev,
@@ -163,6 +197,8 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
           }));
         } catch (itemError) {
           console.error(`Failed to generate ${item.title}:`, itemError);
+          failureCount += 1;
+          failedTitles.push(item.title);
           setGenerationProgress(prev => ({
             ...prev,
             items: prev.items.map(it => 
@@ -173,10 +209,20 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
       }
 
       await new Promise(resolve => setTimeout(resolve, 500));
-      // Track auto-populate completion
-      analyticsService.trackAIOptimizeSuccess(0, 0, 'auto_populate');
-      analyticsService.trackCreditsUsed('auto_populate', selectedRoles.length);
-      onComplete();
+      if (successCount > 0) {
+        // Track auto-populate completion
+        analyticsService.trackAIOptimizeSuccess(0, 0, 'auto_populate');
+        analyticsService.trackCreditsUsed('auto_populate', successCount * AUTO_POPULATE_AGENT_CREDITS_PER_RESUME);
+        onComplete();
+      }
+      if (failureCount > 0) {
+        const failedText = failedTitles.slice(0, 3).join(', ');
+        const suffix = failedTitles.length > 3 ? `, and ${failedTitles.length - 3} more` : '';
+        const message = `${failureCount} of ${itemsToGenerate.length} resume${itemsToGenerate.length !== 1 ? 's' : ''} failed${failedText ? `: ${failedText}${suffix}` : ''}.`;
+        setError(message);
+        analyticsService.trackAIOptimizeError(message, 'auto_populate');
+        return;
+      }
       handleClose();
     } catch (err) {
       console.error('Failed to generate resumes:', err);
@@ -190,6 +236,7 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
     setStep('source');
     setSelectedRoles([]);
     setSelectedSourceId(null);
+    setSourceResumeRecord(null);
     setSourceResumeData(null);
     setResumeSearch('');
     setRoleSearch('');
@@ -360,7 +407,7 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
                 <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
                   <p className="text-sm text-amber-800">
                     <span className="font-medium">{selectedRoles.length} role{selectedRoles.length > 1 ? 's' : ''}</span> selected • 
-                    <span className="font-medium"> {selectedRoles.length} credit{selectedRoles.length > 1 ? 's' : ''}</span> will be used
+                    <span className="font-medium"> {selectedRoles.length * AUTO_POPULATE_AGENT_CREDITS_PER_RESUME} credit{selectedRoles.length * AUTO_POPULATE_AGENT_CREDITS_PER_RESUME !== 1 ? 's' : ''}</span> will be used
                   </p>
                   <p className="text-xs text-amber-600 mt-0.5">You have {credits} credits available</p>
                 </div>

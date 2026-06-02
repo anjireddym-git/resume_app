@@ -189,11 +189,15 @@ export async function uploadHtmlAsGoogleDoc(getAccessToken, htmlBlob, name, fold
  * a freshly generated DOCX blob.
  */
 export async function updateDocxContent(getAccessToken, fileId, blob) {
-  const url = `${DRIVE_UPLOAD}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime`;
+  const metadata = { mimeType: GOOGLE_DOC_MIME };
+  const boundary = `boundary_${Math.random().toString(36).slice(2)}`;
+  const body = await buildMultipartBody(metadata, blob, boundary, DOCX_MIME);
+
+  const url = `${DRIVE_UPLOAD}/files/${fileId}?uploadType=multipart&fields=id,name,mimeType,modifiedTime,webViewLink`;
   const data = await authedJson(getAccessToken, url, {
     method: 'PATCH',
-    headers: { 'Content-Type': DOCX_MIME },
-    body: blob,
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
   });
   return data;
 }

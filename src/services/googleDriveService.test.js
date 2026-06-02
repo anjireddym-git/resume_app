@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { classifyDriveApiError, uploadHtmlAsGoogleDoc } from './googleDriveService';
+import { classifyDriveApiError, updateDocxContent, uploadHtmlAsGoogleDoc } from './googleDriveService';
 
 describe('classifyDriveApiError', () => {
   afterEach(() => {
@@ -43,6 +43,27 @@ describe('classifyDriveApiError', () => {
 
     expect(result).toEqual({ id: 'file-1' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][1].body.type).toContain('multipart/related');
+  });
+
+  it('updates native Google Docs with multipart DOCX import metadata', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'file-1', mimeType: 'application/vnd.google-apps.document' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+
+    const result = await updateDocxContent(
+      async () => 'token',
+      'file-1',
+      new Blob(['docx'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+    );
+
+    expect(result).toEqual({ id: 'file-1', mimeType: 'application/vnd.google-apps.document' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toContain('/upload/drive/v3/files/file-1?uploadType=multipart');
+    expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
+    expect(fetchMock.mock.calls[0][1].headers['Content-Type']).toContain('multipart/related');
     expect(fetchMock.mock.calls[0][1].body.type).toContain('multipart/related');
   });
 });

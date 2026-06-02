@@ -1,18 +1,30 @@
-import React, { useState, useEffect } from 'react';
-import { Check, Loader2, ArrowLeft, RotateCcw } from 'lucide-react';
+import React, { useMemo, useState, useEffect } from 'react';
+import { AlertCircle, Check, Cloud, ExternalLink, FileText, Loader2, ArrowLeft, RotateCcw } from 'lucide-react';
 import ThemeEditor from './ThemeEditor';
-import ClassicTemplate from '../templates/ClassicTemplate';
+import GeneratedDocxPreview from './GeneratedDocxPreview';
 import { updateGroupTheme } from '../services/resumeService';
+import { getOpenInDocsUrl } from '../services/googleDriveService';
 import { analyticsService } from '../services/analyticsService';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 
-const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate }) => {
+const ThemeCustomizationModal = ({
+  isOpen,
+  onClose,
+  group,
+  resumeData,
+  driveFileId,
+  onUpdate,
+  onSyncNow,
+  isSyncing = false,
+  syncError = '',
+}) => {
   const [themeConfig, setThemeConfig] = useState(DEFAULT_THEME_CONFIG);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (isOpen && group) {
-      setThemeConfig(group.themeConfig || DEFAULT_THEME_CONFIG);
+      const nextConfig = group.themeConfig || DEFAULT_THEME_CONFIG;
+      setThemeConfig(nextConfig);
     }
   }, [isOpen, group]);
 
@@ -24,7 +36,7 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
       analyticsService.trackThemeChange(themeConfig.preset || 'custom');
       if (themeConfig.colors?.primary) analyticsService.trackColorChange('primary', themeConfig.colors.primary);
       if (themeConfig.fonts?.heading) analyticsService.trackFontChange('heading', themeConfig.fonts.heading);
-      if (onUpdate) onUpdate();
+      if (onUpdate) await onUpdate(themeConfig);
       onClose();
     } catch (error) {
       console.error('Failed to save theme:', error);
@@ -32,6 +44,26 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const renderOptions = useMemo(() => ({
+    sectionOrder: group?.sectionOrder,
+    visibleSections: group?.visibleSections,
+    themeConfig,
+    sectionFormats: resumeData?.sectionFormats || {},
+    customSectionDefs: group?.customSectionDefs || resumeData?.customSectionDefs || [],
+  }), [
+    group?.sectionOrder,
+    group?.visibleSections,
+    group?.customSectionDefs,
+    themeConfig,
+    resumeData?.sectionFormats,
+    resumeData?.customSectionDefs,
+  ]);
+
+  const handleSyncNow = () => {
+    if (!onSyncNow) return undefined;
+    return onSyncNow(themeConfig);
   };
 
   const handleReset = () => {
@@ -80,10 +112,68 @@ const ThemeCustomizationModal = ({ isOpen, onClose, group, resumeData, onUpdate 
             <ThemeEditor config={themeConfig} onChange={setThemeConfig} />
           </div>
 
-          {/* Live Preview Pane */}
-          <div className="flex-1 bg-neutral-100 rounded-lg overflow-auto border border-neutral-200">
+          {/* Generated DOCX Preview Pane */}
+          <div className="relative flex-1 bg-neutral-100 rounded-lg overflow-hidden border border-neutral-200 flex flex-col">
+            <div className="h-11 px-3 border-b border-neutral-200 bg-white/95 flex items-center justify-between">
+              <div className="text-xs text-neutral-500 flex items-center gap-1.5">
+                <FileText className="w-3.5 h-3.5" />
+                <span>DOCX Preview</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {driveFileId && (
+                  <a
+                    href={getOpenInDocsUrl(driveFileId)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="h-7 px-2 text-xs text-neutral-600 hover:bg-neutral-100 rounded border border-neutral-200 inline-flex items-center gap-1.5"
+                    title="Open Google Docs copy"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span className="hidden xl:inline">Open in Docs</span>
+                  </a>
+                )}
+                {onSyncNow && (
+                  <button
+                    type="button"
+                    onClick={handleSyncNow}
+                    disabled={isSyncing || !resumeData}
+                    className="h-7 px-2 text-xs text-blue-700 hover:bg-blue-50 rounded border border-blue-100 inline-flex items-center gap-1.5 disabled:opacity-50"
+                    title={driveFileId ? 'Update Google Docs copy' : 'Sync to Google Drive'}
+                  >
+                    {isSyncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}
+                    <span>{driveFileId ? 'Update Drive' : 'Sync Drive'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
             {resumeData ? (
-              <ClassicTemplate resumeData={resumeData} isEditMode={false} />
+              <>
+                <div className="flex-1 min-h-0 overflow-hidden">
+                  <GeneratedDocxPreview resumeData={resumeData} renderOptions={renderOptions} />
+                </div>
+                {isSyncing && (
+                  <div className="absolute top-14 right-3 z-20 rounded-md bg-white/95 px-3 py-1.5 text-xs font-medium text-neutral-600 shadow-sm border border-neutral-200 flex items-center gap-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Syncing Drive copy
+                  </div>
+                )}
+                {syncError && (
+                  <div className="absolute bottom-3 left-3 right-3 z-20 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span className="flex-1">{syncError}</span>
+                    {onSyncNow && (
+                      <button
+                        type="button"
+                        onClick={handleSyncNow}
+                        disabled={isSyncing}
+                        className="rounded border border-red-200 bg-white px-2 py-1 font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                      >
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
             ) : (
               <div className="flex items-center justify-center h-full text-neutral-400">
                 <Loader2 className="w-8 h-8 animate-spin" />

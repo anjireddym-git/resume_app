@@ -309,6 +309,15 @@ const ThemeEditor = ({ config, onChange }) => {
                 step={0.1}
               />
               <SliderControl
+                label="Body Letter Spacing"
+                value={config.typography?.letterSpacing ?? 0}
+                onChange={(v) => updateConfig('typography', 'letterSpacing', v)}
+                min={0}
+                max={3}
+                step={0.25}
+                unit="pt"
+              />
+              <SliderControl
                 label="Name Size Scale"
                 value={config.typography?.nameScale || 2.2}
                 onChange={(v) => updateConfig('typography', 'nameScale', v)}
@@ -477,8 +486,14 @@ const ThemeEditor = ({ config, onChange }) => {
                   <button
                     key={scheme.name}
                     onClick={() => {
-                      updateConfig('colors', 'accent', scheme.accent);
-                      updateConfig('colors', 'text', scheme.text);
+                      onChange({
+                        ...config,
+                        colors: {
+                          ...config.colors,
+                          accent: scheme.accent,
+                          text: scheme.text,
+                        },
+                      });
                     }}
                     className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-neutral-200 hover:border-neutral-400 text-xs"
                   >
@@ -540,6 +555,15 @@ const ThemeEditor = ({ config, onChange }) => {
                 step={0.5}
                 unit="pt"
               />
+              <SliderControl
+                label="Border Weight"
+                value={config.sectionTitle?.borderWidth || 0.5}
+                onChange={(v) => updateConfig('sectionTitle', 'borderWidth', v)}
+                min={0.25}
+                max={2}
+                step={0.25}
+                unit="pt"
+              />
             </CollapsibleSection>
 
             <CollapsibleSection title="Bullet Points" icon={AlignLeft}>
@@ -549,6 +573,15 @@ const ThemeEditor = ({ config, onChange }) => {
                 value={config.content?.bulletStyle || '•'}
                 onChange={(v) => updateConfig('content', 'bulletStyle', v)}
               />
+              <div className="pt-3">
+                <label className="text-xs text-neutral-500 mb-2 block">Bullet Color</label>
+                <OptionGrid
+                  options={THEME_OPTIONS.bulletColors}
+                  value={config.content?.bulletColor || 'text'}
+                  onChange={(v) => updateConfig('content', 'bulletColor', v)}
+                  columns={3}
+                />
+              </div>
             </CollapsibleSection>
 
             <CollapsibleSection title="Date Formatting" icon={AlignLeft}>
@@ -563,13 +596,10 @@ const ThemeEditor = ({ config, onChange }) => {
               <div className="pt-3">
                 <label className="text-xs text-neutral-500 mb-2 block">Date Position</label>
                 <OptionGrid
-                  options={[
-                    { label: 'Right', value: 'right' },
-                    { label: 'Below', value: 'below' },
-                  ]}
+                  options={THEME_OPTIONS.datePositions}
                   value={config.content?.dateAlign || 'right'}
                   onChange={(v) => updateConfig('content', 'dateAlign', v)}
-                  columns={2}
+                  columns={3}
                 />
               </div>
             </CollapsibleSection>
@@ -609,45 +639,6 @@ const ThemeEditor = ({ config, onChange }) => {
                   checked={config.content?.showLocation ?? true}
                   onChange={(v) => updateConfig('content', 'showLocation', v)}
                 />
-              </div>
-            </CollapsibleSection>
-
-            <CollapsibleSection title="Skills Display" icon={Sliders} defaultOpen={false}>
-              <label className="text-xs text-neutral-500 mb-2 block">Proficiency Style</label>
-              <OptionGrid
-                options={THEME_OPTIONS.skillProficiencyStyles}
-                value={config.content?.skillProficiency || 'none'}
-                onChange={(v) => updateConfig('content', 'skillProficiency', v)}
-                columns={3}
-              />
-            </CollapsibleSection>
-
-            <CollapsibleSection title="ATS Optimization" icon={Sliders} defaultOpen={false}>
-              <p className="text-xs text-neutral-500 mb-3">
-                Settings to maximize ATS (Applicant Tracking System) compatibility
-              </p>
-              <div className="space-y-2">
-                <ToggleSwitch
-                  label="Use Standard Section Names"
-                  checked={config.ats?.useStandardSections ?? true}
-                  onChange={(v) => updateConfig('ats', 'useStandardSections', v)}
-                />
-                <ToggleSwitch
-                  label="Avoid Complex Graphics"
-                  checked={config.ats?.avoidGraphics ?? true}
-                  onChange={(v) => updateConfig('ats', 'avoidGraphics', v)}
-                />
-                <ToggleSwitch
-                  label="Simple Layout"
-                  checked={config.ats?.simpleLayout ?? true}
-                  onChange={(v) => updateConfig('ats', 'simpleLayout', v)}
-                />
-              </div>
-              
-              <div className="mt-3 p-3 bg-green-50 rounded-lg border border-green-200">
-                <p className="text-xs text-green-700">
-                  ✓ Your current settings are ATS-friendly. The resume uses standard fonts, clear hierarchy, and parseable text.
-                </p>
               </div>
             </CollapsibleSection>
           </div>

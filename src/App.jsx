@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { FileText, RefreshCw, LogOut, User, ChevronDown, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
 import { CreditsProvider, useCredits } from './contexts/CreditsContext';
@@ -13,8 +13,7 @@ import OutreachWorkspace from './components/outreach';
 import useOutreachCounts from './hooks/useOutreachCounts';
 import VersionHistory from './components/VersionHistory';
 import ResumeEditor from './components/ResumeEditor';
-import ClassicTemplate from './templates/ClassicTemplate';
-import GoogleDocsPreview from './components/GoogleDocsPreview';
+import GeneratedDocxPreview from './components/GeneratedDocxPreview';
 import SyncStatusBadge from './components/SyncStatusBadge';
 import SectionReorder from './components/SectionReorder';
 import MatchAnalysis from './components/MatchAnalysis';
@@ -28,6 +27,7 @@ import { geminiService } from './services/geminiService';
 import { analyticsService } from './services/analyticsService';
 import { DEFAULT_SECTION_ORDER } from './config/templates';
 import { normalizeSummaryToPoints } from './lib/summaryUtils';
+import { buildCustomExperienceForSave } from './lib/resumeExperienceOverrides';
 import { 
   getResumeGroup, 
   getResume, 
@@ -45,6 +45,23 @@ import useResumeEditor from './hooks/useResumeEditor';
 import { drainDriveCleanup, syncResumeToDriveByIds } from './services/driveSyncService';
 
 const INITIAL_RESUME_DATA = {};
+const SIDEBAR_WIDTH_KEY = 'resumeSidebarWidth';
+const DEFAULT_SIDEBAR_WIDTH = 320;
+const MIN_SIDEBAR_WIDTH = 256;
+const MAX_SIDEBAR_WIDTH = 560;
+
+function getInitialSidebarWidth() {
+  if (typeof window === 'undefined') return DEFAULT_SIDEBAR_WIDTH;
+  try {
+    const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    if (Number.isFinite(stored)) {
+      return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, stored));
+    }
+  } catch {
+    // Ignore storage access issues; the default width is fine.
+  }
+  return DEFAULT_SIDEBAR_WIDTH;
+}
 
 const OutreachTabs = ({ view, setView }) => {
   const { total } = useOutreachCounts();
@@ -107,13 +124,16 @@ function App() {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(getInitialSidebarWidth);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   
   // Theme Design Modal State
   const [showDesignModal, setShowDesignModal] = useState(false);
   const [designResumeData, setDesignResumeData] = useState(null);
+  const [designResumeRecord, setDesignResumeRecord] = useState(null);
   const [designGroup, setDesignGroup] = useState(null);
-
-
+  const [designSyncing, setDesignSyncing] = useState(false);
+  const [designSyncError, setDesignSyncError] = useState('');
   
   // Current selection
   const [selectedGroupId, setSelectedGroupId] = useState(null);
@@ -147,6 +167,8 @@ function App() {
 
   const resumeRef = useRef(null);
   const resumeDataRef = useRef({}); // Keep track of latest resume data
+  const sidebarPanelRef = useRef(null);
+  const sidebarWidthRef = useRef(sidebarWidth);
   
   const {
     resumeData,
@@ -161,6 +183,60 @@ function App() {
   useEffect(() => {
     resumeDataRef.current = resumeData;
   }, [resumeData]);
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isResizingSidebar) return;
+
+    const handlePointerMove = (event) => {
+      const left = sidebarPanelRef.current?.getBoundingClientRect()?.left || 0;
+      const nextWidth = Math.min(
+        MAX_SIDEBAR_WIDTH,
+        Math.max(MIN_SIDEBAR_WIDTH, event.clientX - left)
+      );
+      sidebarWidthRef.current = nextWidth;
+      setSidebarWidth(nextWidth);
+    };
+
+    const handlePointerUp = () => {
+      setIsResizingSidebar(false);
+      try {
+        window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(sidebarWidthRef.current)));
+      } catch {
+        // Persistence is a convenience; resizing should still work without it.
+      }
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp, { once: true });
+
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [isResizingSidebar]);
+
+  const currentRenderOptions = useMemo(() => ({
+    sectionOrder: sectionOrder.filter((s) => visibleSections.includes(s)),
+    visibleSections,
+    themeConfig: currentGroup?.themeConfig,
+    sectionFormats: resumeData?.sectionFormats || {},
+    customSectionDefs: currentGroup?.customSectionDefs || resumeData?.customSectionDefs || [],
+  }), [
+    sectionOrder,
+    visibleSections,
+    currentGroup?.themeConfig,
+    currentGroup?.customSectionDefs,
+    resumeData?.sectionFormats,
+    resumeData?.customSectionDefs,
+  ]);
 
   // Gemini service is initialized automatically via Cloud Functions
   // No need for API key initialization on frontend
@@ -536,7 +612,7 @@ function App() {
    * Google Doc on first call, updates it on subsequent calls. Failures are
    * logged and reflected in syncStatus; never blocks the user.
    */
-  const autoSyncToDrive = useCallback(async (latestData, { force = false, accessToken = null } = {}) => {
+  const autoSyncToDrive = useCallback(async (latestData, { force = false, accessToken = null, renderOptions = null } = {}) => {
     if (!currentResume || !currentGroup || (!driveSyncEnabled && !force)) return;
     setSyncStatus('syncing');
     setSyncError('');
@@ -546,7 +622,7 @@ function App() {
         groupId: currentGroup.id,
         resume: currentResume,
         resumeData: latestData || resumeDataRef.current,
-        sectionOrder: sectionOrder.filter((s) => visibleSections.includes(s)),
+        renderOptions: renderOptions || currentRenderOptions,
       });
       setCurrentResume((prev) => prev ? {
         ...prev,
@@ -570,7 +646,7 @@ function App() {
         setSyncStatus('error');
       }
     }
-  }, [currentResume, currentGroup, driveSyncEnabled, getGoogleAccessToken, invalidateGoogleAccessToken, sectionOrder, visibleSections]);
+  }, [currentResume, currentGroup, driveSyncEnabled, getGoogleAccessToken, invalidateGoogleAccessToken, currentRenderOptions]);
 
   // Auto-sync resume to Drive whenever a new resume is opened that isn't yet
   // backed by a Google Doc. Must be after autoSyncToDrive definition.
@@ -651,10 +727,10 @@ function App() {
       const sanitizedData = {
         personalInfo: dataToSave.personalInfo || {},
         summary: dataToSave.summary || '',
-        experience: (dataToSave.experience || []).map(exp => ({
-          highlights: exp.highlights || [],
-          environment: exp.environment || ''
-        })),
+        experience: buildCustomExperienceForSave(
+          dataToSave.experience || [],
+          currentGroup?.sharedData?.experience || []
+        ),
         education: dataToSave.education || [],
         skills: dataToSave.skills || {},
         projects: dataToSave.projects || [],
@@ -717,6 +793,97 @@ function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [hasUnsavedChanges]);
 
+  const syncDesignDocToDrive = useCallback(async (
+    themeConfigOverride,
+    { interactive = false, groupOverride = null } = {}
+  ) => {
+    const baseGroup = groupOverride || designGroup;
+    const resumeRecord = designResumeRecord;
+    const sourceResumeData = currentResume?.id === resumeRecord?.id
+      ? resumeDataRef.current
+      : designResumeData;
+
+    if (!baseGroup?.id || !resumeRecord?.id || !sourceResumeData) {
+      setDesignSyncError('Select a saved resume before syncing a Google Docs copy.');
+      return null;
+    }
+
+    if (!hasGoogleDriveAccess && !interactive) {
+      setDesignSyncError('Connect Google Drive to update this Google Docs copy.');
+      return null;
+    }
+
+    setDesignSyncing(true);
+    setDesignSyncError('');
+
+    try {
+      const accessToken = !hasGoogleDriveAccess && interactive
+        ? await connectGoogleDrive()
+        : null;
+      const nextThemeConfig = themeConfigOverride || baseGroup.themeConfig;
+      const nextSectionOrder = baseGroup.sectionOrder || DEFAULT_SECTION_ORDER;
+      const nextVisibleSections = baseGroup.visibleSections || nextSectionOrder;
+      const renderOptions = {
+        sectionOrder: nextSectionOrder.filter((section) => nextVisibleSections.includes(section)),
+        visibleSections: nextVisibleSections,
+        themeConfig: nextThemeConfig,
+        sectionFormats: sourceResumeData?.sectionFormats || {},
+        customSectionDefs: baseGroup.customSectionDefs || sourceResumeData?.customSectionDefs || [],
+      };
+      const result = await syncResumeToDriveByIds({
+        getAccessToken: accessToken ? async () => accessToken : getGoogleAccessToken,
+        groupId: baseGroup.id,
+        resume: resumeRecord,
+        resumeData: {
+          ...sourceResumeData,
+          themeConfig: nextThemeConfig,
+        },
+        renderOptions,
+      });
+      const driveMetadata = {
+        driveFileId: result.fileId,
+        driveFolderId: result.folderId,
+        driveWebViewLink: result.webViewLink,
+      };
+
+      setDesignResumeRecord((prev) => (
+        prev?.id === resumeRecord.id ? { ...prev, ...driveMetadata } : prev
+      ));
+      if (currentResume?.id === resumeRecord.id) {
+        setCurrentResume((prev) => (prev ? { ...prev, ...driveMetadata } : prev));
+        setSyncStatus('synced');
+      }
+      return result;
+    } catch (err) {
+      if (err?.kind === 'authorization-required') {
+        invalidateGoogleAccessToken('Google Drive authorization expired. Reconnect to update the Google Docs copy.');
+        setDesignSyncError('Reconnect Google Drive to update this Google Docs copy.');
+        if (currentResume?.id === resumeRecord.id) setSyncStatus('auth-error');
+      } else {
+        const message = err?.kind === 'api-disabled'
+          ? 'Google Drive API is disabled for this project.'
+          : err?.message || 'Could not update the Google Docs copy.';
+        setDesignSyncError(message);
+        if (currentResume?.id === resumeRecord.id) {
+          setSyncError(message);
+          setSyncStatus('error');
+        }
+      }
+      return null;
+    } finally {
+      setDesignSyncing(false);
+    }
+  }, [
+    connectGoogleDrive,
+    currentResume?.id,
+    designGroup,
+    designResumeData,
+    designResumeRecord,
+    getGoogleAccessToken,
+    hasGoogleDriveAccess,
+    invalidateGoogleAccessToken,
+  ]);
+
   // Show splash
   if (showSplash) {
     return <SplashScreen onComplete={() => setShowSplash(false)} />;
@@ -758,33 +925,45 @@ function App() {
     // If no resumeId is passed, try to find the first one or create a dummy one
     
     let targetResume = null;
+    let targetResumeRecord = null;
     
     try {
       if (resumeId) {
-        if (selectedResumeId === resumeId && resumeData) {
+        if (selectedResumeId === resumeId && currentResume?.id === resumeId && resumeData) {
           targetResume = resumeData;
+          targetResumeRecord = currentResume;
         } else {
           // Fetch specific resume
            const resume = await getResume(resumeId);
+           targetResumeRecord = resume;
            targetResume = buildFullResume(group, resume);
         }
       } else {
-         // Try to get first resume in group to use as preview
-         const resumes = await getResumesInGroup(group.id, user.uid);
-         if (resumes.length > 0) {
-            targetResume = buildFullResume(group, resumes[0]);
-         } else {
+        if (selectedGroupId === group.id && currentResume?.id && resumeDataRef.current) {
+          targetResumeRecord = currentResume;
+          targetResume = resumeDataRef.current;
+        } else {
+          // Try to get first resume in group to use as preview
+          const resumes = await getResumesInGroup(group.id, user.uid);
+          if (resumes.length > 0) {
+            targetResumeRecord = resumes[0];
+            targetResume = buildFullResume(group, targetResumeRecord);
+          } else {
             // No resumes in group? Just use placeholder data or shared data
             targetResume = {
-                personalInfo: group.sharedData?.personalInfo || {},
-                experience: group.sharedData?.experience || [],
-                education: group.sharedData?.education || [],
-            }
-         }
+              personalInfo: group.sharedData?.personalInfo || {},
+              experience: group.sharedData?.experience || [],
+              education: group.sharedData?.education || [],
+            };
+          }
+        }
       }
 
       setDesignGroup(group);
       setDesignResumeData(targetResume);
+      setDesignResumeRecord(targetResumeRecord);
+      setDesignSyncError('');
+      setDesignSyncing(false);
       setShowDesignModal(true);
       // Track design modal open
       analyticsService.trackModalOpen('theme_customization');
@@ -794,21 +973,27 @@ function App() {
     }
   };
 
-  const handleDesignUpdate = async () => {
+  const handleDesignUpdate = async (nextThemeConfig = null) => {
     setRefreshTrigger(prev => prev + 1);
     // Track theme design update
-    analyticsService.trackThemeChange(designGroup?.themeConfig?.preset || 'custom');
+    analyticsService.trackThemeChange(nextThemeConfig?.preset || designGroup?.themeConfig?.preset || 'custom');
     
-    // Always try to reload current group if we have one selected
-    // This ensures the PDF preview updates with new theme
-    if (selectedGroupId && designGroup?.id) {
+    // Reload the designed group so the dashboard and managed Google Doc use
+    // the same saved theme settings.
+    if (designGroup?.id) {
         try {
           // Reload the group that was just designed
           const updatedGroup = await getResumeGroup(designGroup.id);
+          const groupForSync = updatedGroup || {
+            ...designGroup,
+            themeConfig: nextThemeConfig || designGroup.themeConfig,
+          };
+
+          setDesignGroup(groupForSync);
           
-          // If we're viewing the same group, update currentGroup
+          // If we're viewing the same group, update currentGroup.
           if (selectedGroupId === designGroup.id) {
-            setCurrentGroup(updatedGroup);
+            setCurrentGroup(groupForSync);
           }
         } catch (err) {
           console.error('Failed to reload group:', err);
@@ -913,7 +1098,7 @@ function App() {
           }}
         />
       ) : (
-      <div className="flex-1 flex overflow-hidden relative">
+      <div className="flex-1 min-w-0 flex overflow-hidden relative">
         {/* Mobile Sidebar Overlay */}
         {sidebarOpen && (
           <div 
@@ -923,12 +1108,16 @@ function App() {
         )}
         
         {/* Left Sidebar - File Browser */}
-        <div className={`
-          fixed inset-y-0 left-0 z-50 w-64 bg-white border-r border-neutral-200 
+        <div
+          ref={sidebarPanelRef}
+          style={{ '--sidebar-width': `${sidebarWidth}px` }}
+          className={`
+          fixed inset-y-0 left-0 z-50 w-[min(20rem,85vw)] bg-white border-r border-neutral-200
           transform transition-transform duration-300 ease-in-out
-          md:relative md:translate-x-0 md:z-0
+          md:relative md:w-[var(--sidebar-width)] md:translate-x-0 md:z-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-        `}>
+        `}
+        >
           {/* Mobile Sidebar Header */}
           <div className="h-14 border-b border-neutral-200 flex items-center justify-between px-4 md:hidden">
             <span className="font-medium text-neutral-900">Resumes</span>
@@ -957,14 +1146,52 @@ function App() {
             onEditDesign={(group, resumeId) => { handleEditDesign(group, resumeId); setSidebarOpen(false); }}
             refreshTrigger={refreshTrigger}
           />
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize resume browser"
+            aria-valuemin={MIN_SIDEBAR_WIDTH}
+            aria-valuemax={MAX_SIDEBAR_WIDTH}
+            aria-valuenow={Math.round(sidebarWidth)}
+            tabIndex={0}
+            title="Drag to resize"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              setIsResizingSidebar(true);
+            }}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault();
+              setSidebarWidth((current) => {
+                let next;
+                if (event.key === 'Home') {
+                  next = MIN_SIDEBAR_WIDTH;
+                } else if (event.key === 'End') {
+                  next = MAX_SIDEBAR_WIDTH;
+                } else {
+                  const delta = event.key === 'ArrowRight' ? 24 : -24;
+                  next = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, current + delta));
+                }
+                try {
+                  window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(next)));
+                } catch {
+                  // Persistence is a convenience; keyboard resizing still works without it.
+                }
+                return next;
+              });
+            }}
+            className={`absolute right-0 top-0 hidden h-full w-2 translate-x-1 cursor-col-resize md:block ${
+              isResizingSidebar ? 'bg-blue-400/40' : 'hover:bg-blue-400/25'
+            }`}
+          />
         </div>
 
         {/* Main Area */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 min-w-0 flex overflow-hidden">
           {selectedResumeId && currentResume ? (
             <>
               {/* Left Panel - Web Editor + Controls */}
-              <div className="flex-1 flex flex-col overflow-hidden relative">
+              <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
                 {/* Toolbar */}
                 <div className="min-h-14 border-b border-neutral-200 bg-white px-3 md:px-4 py-2 flex flex-wrap items-center justify-between gap-2 flex-shrink-0">
                   <div className="flex items-center gap-2 md:gap-3 flex-wrap">
@@ -1034,7 +1261,7 @@ function App() {
                     <ActionButtons
                       resumeRef={resumeRef}
                       resumeData={resumeData}
-                      sectionOrder={sectionOrder.filter(s => visibleSections.includes(s))}
+                      renderOptions={currentRenderOptions}
                       hasChanges={hasUnsavedChanges}
                       currentResume={currentResume}
                     />
@@ -1064,7 +1291,7 @@ function App() {
                 )}
 
                 {/* Content Area - Resizable Split Pane (desktop) / Editor only (mobile) */}
-                <div className="flex-1 flex overflow-hidden">
+                <div className="flex-1 min-w-0 flex overflow-hidden">
                   {/* Layout Panel (collapsible) */}
                   {showLayoutPanel && (
                     <div className="w-56 border-r border-neutral-200 bg-white p-4 overflow-y-auto flex-shrink-0">
@@ -1106,7 +1333,7 @@ function App() {
                   )}
 
                   {/* Desktop: Resizable Split Pane */}
-                  <div className="hidden lg:flex flex-1 overflow-hidden">
+                  <div className="hidden lg:flex flex-1 min-w-0 overflow-hidden">
                     <ResizableSplitPane
                       defaultLeftWidth={55}
                       minLeftWidth={30}
@@ -1114,7 +1341,7 @@ function App() {
                       leftLabel="Editor"
                       rightLabel="Preview"
                       left={
-                        <div className="flex-1 overflow-hidden bg-white">
+                        <div className="flex-1 min-w-0 overflow-hidden bg-white">
                           <ResumeEditor
                             resumeData={resumeData}
                             onUpdate={handleFieldUpdate}
@@ -1123,9 +1350,9 @@ function App() {
                         </div>
                       }
                       right={
-                        <div className="flex-1 flex flex-col bg-neutral-100 p-4">
+                        <div className="flex-1 min-w-0 flex flex-col bg-neutral-100 p-4">
                           <div className="flex items-center justify-between mb-2">
-                            <div className="text-xs text-neutral-400">Live Preview</div>
+                            <div className="text-xs text-neutral-400">DOCX Preview</div>
                             <SyncStatusBadge
                               status={syncStatus}
                               enabled={driveSyncEnabled}
@@ -1136,18 +1363,11 @@ function App() {
                               onDisconnect={handleDisconnectDrive}
                             />
                           </div>
-                          <div className="flex-1 overflow-auto bg-white rounded-lg shadow-sm border border-neutral-200">
-                            {currentResume?.driveFileId ? (
-                              <GoogleDocsPreview
-                                fileId={currentResume.driveFileId}
-                                mode="preview"
-                              />
-                            ) : (
-                              <ClassicTemplate
-                                resumeData={resumeData}
-                                isEditMode={false}
-                              />
-                            )}
+                          <div className="flex-1 min-w-0 overflow-hidden bg-white rounded-lg shadow-sm border border-neutral-200">
+                            <GeneratedDocxPreview
+                              resumeData={resumeData}
+                              renderOptions={currentRenderOptions}
+                            />
                           </div>
                         </div>
                       }
@@ -1155,7 +1375,7 @@ function App() {
                   </div>
 
                   {/* Mobile: Editor only */}
-                  <div className="lg:hidden flex-1 overflow-hidden">
+                  <div className="lg:hidden flex-1 min-w-0 overflow-hidden">
                     <ResumeEditor
                       resumeData={resumeData}
                       onUpdate={handleFieldUpdate}
@@ -1217,10 +1437,17 @@ function App() {
 
       <ThemeCustomizationModal
         isOpen={showDesignModal}
-        onClose={() => setShowDesignModal(false)}
+        onClose={() => {
+          setShowDesignModal(false);
+          setDesignSyncError('');
+        }}
         resumeData={designResumeData}
         group={designGroup}
+        driveFileId={designResumeRecord?.driveFileId}
         onUpdate={handleDesignUpdate}
+        onSyncNow={(themeConfig) => syncDesignDocToDrive(themeConfig, { interactive: true })}
+        isSyncing={designSyncing}
+        syncError={designSyncError}
       />
 
 

@@ -270,6 +270,7 @@ class AIService {
       sourceResumeId: options.sourceResumeId || null,
       mode: options.mode || 'optimize',
       label: options.label || null,
+      targetResumeName: options.targetResumeName || null,
     };
     // httpsCallable supports `.stream()` since Firebase JS SDK v11.
     const { stream, data } = await this.runResumeAgentStreaming.stream(payload);

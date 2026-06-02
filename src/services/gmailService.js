@@ -20,13 +20,7 @@ export class GmailAuthError extends Error {
   }
 }
 
-const base64UrlEncode = (str) =>
-  btoa(unescape(encodeURIComponent(str)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-
-const base64UrlEncodeBytes = (uint8) => {
+const bytesToBinaryString = (uint8) => {
   // Avoid spreading huge arrays into String.fromCharCode.apply (stack overflow
   // for large attachments). Build the binary string in chunks.
   let binary = '';
@@ -34,13 +28,78 @@ const base64UrlEncodeBytes = (uint8) => {
   for (let i = 0; i < uint8.length; i += chunk) {
     binary += String.fromCharCode.apply(null, uint8.subarray(i, i + chunk));
   }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return binary;
 };
+
+const utf8Bytes = (str) => new TextEncoder().encode(String(str ?? ''));
+
+const base64EncodeBytes = (uint8) => btoa(bytesToBinaryString(uint8));
+
+const base64EncodeUtf8 = (str) => base64EncodeBytes(utf8Bytes(str));
+
+const base64UrlEncode = (str) =>
+  base64EncodeUtf8(str)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+const base64UrlEncodeBytes = (uint8) => {
+  return base64EncodeBytes(uint8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+
+const wrapBase64 = (value) => String(value || '').match(/.{1,76}/g)?.join('\r\n') || '';
+
+const sanitizeHeaderValue = (value) =>
+  String(value ?? '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+const hasNonAscii = (value) => /[^\x20-\x7E]/.test(value);
+
+export const encodeMimeHeaderValue = (value) => {
+  const clean = sanitizeHeaderValue(value);
+  if (!clean || !hasNonAscii(clean)) return clean;
+
+  const chunks = [];
+  let current = '';
+  let currentBytes = 0;
+  for (const char of clean) {
+    const byteLength = utf8Bytes(char).length;
+    if (current && currentBytes + byteLength > 36) {
+      chunks.push(current);
+      current = '';
+      currentBytes = 0;
+    }
+    current += char;
+    currentBytes += byteLength;
+  }
+  if (current) chunks.push(current);
+
+  return chunks
+    .map((chunk) => `=?UTF-8?B?${base64EncodeUtf8(chunk)}?=`)
+    .join('\r\n ');
+};
+
+const formatHeaderPhrase = (value) => {
+  const clean = sanitizeHeaderValue(value);
+  if (!clean) return '';
+  if (hasNonAscii(clean)) return encodeMimeHeaderValue(clean);
+  if (/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~ ]+$/.test(clean)) return clean;
+  return `"${clean.replace(/(["\\])/g, '\\$1')}"`;
+};
+
+const asciiFilenameFallback = (value) => {
+  const clean = sanitizeHeaderValue(value) || 'attachment';
+  return clean.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+};
+
+const encodeRfc5987Value = (value) =>
+  encodeURIComponent(sanitizeHeaderValue(value))
+    .replace(/['()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/\*/g, '%2A');
 
 const normalizeRecipients = (input) => {
   if (!input) return [];
-  if (Array.isArray(input)) return input.map((s) => String(s).trim()).filter(Boolean);
-  return String(input).split(',').map((s) => s.trim()).filter(Boolean);
+  if (Array.isArray(input)) return input.map((s) => sanitizeHeaderValue(s)).filter(Boolean);
+  return String(input).split(',').map((s) => sanitizeHeaderValue(s)).filter(Boolean);
 };
 
 const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
@@ -65,7 +124,7 @@ export const formatGmailWatchError = (err) => {
  * Build a RFC 2822 multipart/mixed MIME message with a base64-encoded
  * attachment. Returns the message body as a string.
  */
-async function buildMimeMessage({
+export async function buildMimeMessage({
   fromName,
   fromEmail,
   to,
@@ -83,26 +142,30 @@ async function buildMimeMessage({
   const bccHeader = normalizeRecipients(bcc).join(', ');
   if (!toHeader) throw new Error('At least one "To" recipient is required');
 
-  const fromHeader = fromName ? `${fromName} <${fromEmail}>` : fromEmail;
+  const fromHeader = fromName
+    ? `${formatHeaderPhrase(fromName)} <${sanitizeHeaderValue(fromEmail)}>`
+    : sanitizeHeaderValue(fromEmail);
   const headerLines = [
     `From: ${fromHeader}`,
     `To: ${toHeader}`,
     ccHeader ? `Cc: ${ccHeader}` : null,
     bccHeader ? `Bcc: ${bccHeader}` : null,
-    `Subject: ${subject || ''}`,
+    `Subject: ${encodeMimeHeaderValue(subject || '')}`,
     'MIME-Version: 1.0',
-    inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
-    references ? `References: ${references}` : null,
+    inReplyTo ? `In-Reply-To: ${sanitizeHeaderValue(inReplyTo)}` : null,
+    references ? `References: ${sanitizeHeaderValue(references)}` : null,
   ].filter(Boolean);
+
+  const encodedBody = wrapBase64(base64EncodeUtf8(body || ''));
 
   if (!attachment) {
     return (
       [
         ...headerLines,
         'Content-Type: text/plain; charset="UTF-8"',
-        'Content-Transfer-Encoding: 7bit',
+        'Content-Transfer-Encoding: base64',
         '',
-        body || '',
+        encodedBody,
       ].join('\r\n')
     );
   }
@@ -112,8 +175,12 @@ async function buildMimeMessage({
     // Gmail tolerates standard base64 too; switch back for safety in MIME body.
     .replace(/-/g, '+')
     .replace(/_/g, '/');
-  // Re-wrap to 76-char lines for MIME compliance.
-  const wrapped = attachmentB64.match(/.{1,76}/g).join('\r\n');
+  const wrapped = wrapBase64(attachmentB64);
+  const attachmentFilename = sanitizeHeaderValue(attachment.filename) || 'attachment';
+  const fallbackFilename = asciiFilenameFallback(attachmentFilename);
+  const filenameStar = hasNonAscii(attachmentFilename)
+    ? `; filename*=UTF-8''${encodeRfc5987Value(attachmentFilename)}`
+    : '';
 
   return [
     ...headerLines,
@@ -121,13 +188,13 @@ async function buildMimeMessage({
     '',
     `--${boundary}`,
     'Content-Type: text/plain; charset="UTF-8"',
-    'Content-Transfer-Encoding: 7bit',
+    'Content-Transfer-Encoding: base64',
     '',
-    body || '',
+    encodedBody,
     '',
     `--${boundary}`,
-    `Content-Type: ${attachment.mimeType || 'application/octet-stream'}; name="${attachment.filename}"`,
-    `Content-Disposition: attachment; filename="${attachment.filename}"`,
+    `Content-Type: ${attachment.mimeType || 'application/octet-stream'}; name="${fallbackFilename}"`,
+    `Content-Disposition: attachment; filename="${fallbackFilename}"${filenameStar}`,
     'Content-Transfer-Encoding: base64',
     '',
     wrapped,

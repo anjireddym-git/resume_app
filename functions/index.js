@@ -7,6 +7,17 @@ const admin = require('firebase-admin');
 const Stripe = require('stripe');
 const { GoogleGenAI } = require('@google/genai');
 const OpenAI = require('openai');
+const {
+  CONTRACT_DENSITY,
+  getExperienceBulletRange,
+  getOlderExperienceCombinedRequirement,
+  getSummaryRequirement,
+  validateContractResumeDensity,
+} = require('./contractResumeDensity');
+const {
+  buildAuthenticityInstructions,
+  validateResumeAuthenticity,
+} = require('./resumeAuthenticity');
 
 // Initialize Firebase Admin
 admin.initializeApp();
@@ -228,12 +239,42 @@ async function callAIText(aiClient, model, provider, prompt, options = {}) {
     return response.output_text || '';
   } else {
     // Gemini
+    const geminiConfig = {};
+    if (options.maxOutputTokens) geminiConfig.maxOutputTokens = options.maxOutputTokens;
     const response = await aiClient.models.generateContent({
       model,
       contents: prompt,
+      ...(Object.keys(geminiConfig).length > 0 ? { config: geminiConfig } : {}),
     });
     return response.text;
   }
+}
+
+function buildContractDensityInstructions(baseResume = {}) {
+  const summaryRequirement = getSummaryRequirement(baseResume.summary || '');
+  const experience = Array.isArray(baseResume.experience) ? baseResume.experience : [];
+  const experienceLines = experience.length
+    ? experience.map((exp, index) => {
+      const range = getExperienceBulletRange(index, exp?.highlights || []);
+      const label = index === 0 ? 'Most recent experience' : `Experience ${index + 1}`;
+      return `- ${label}${exp?.company ? ` (${exp.company})` : ''}: ${range.min}+ bullets`;
+    }).join('\n')
+    : `- Most recent experience: ${CONTRACT_DENSITY.latestExperienceMinBullets}+ bullets\n- Each additional experience: ${CONTRACT_DENSITY.otherExperienceMinBullets}+ bullets`;
+  const olderRequirement = getOlderExperienceCombinedRequirement(experience);
+  const olderLine = olderRequirement.applies
+    ? `- Older experiences combined (all roles after the most recent): ${olderRequirement.min}+ total bullets.`
+    : `- If the resume has ${CONTRACT_DENSITY.olderExperienceCombinedAppliesAtTotalRoles}+ experience entries, older experiences combined must have ${CONTRACT_DENSITY.olderExperienceCombinedMinBullets}+ total bullets.`;
+
+  return `CONTRACT RESUME DENSITY REQUIREMENTS:
+- Summary must be ${summaryRequirement.min}-${summaryRequirement.targetMax} professional summary points, with exactly one point per newline in the summary string.
+- Do not return the summary as a paragraph. Do not compress multiple summary points into one sentence.
+- If the base summary already has more than ${CONTRACT_DENSITY.summaryTargetMaxPoints} points, preserve or exceed that count.
+- Experience bullet counts:
+${experienceLines}
+${olderLine}
+- Never reduce any experience below its original bullet count.
+- Each experience bullet should be ${CONTRACT_DENSITY.bulletTargetMinWords}-${CONTRACT_DENSITY.bulletTargetMaxWords} words so it visually wraps to about two resume lines.
+- Use one complete sentence per bullet unless the user specifically asks for another style. Do not insert manual newline characters inside individual bullets.`;
 }
 
 /**
@@ -252,10 +293,14 @@ ${targetRole}
 ═══════════════════════════════════════════════════════════════════════════════
 CRITICAL CONTENT RULES (MUST FOLLOW):
 ═══════════════════════════════════════════════════════════════════════════════
-1. EXPAND, NEVER REDUCE: Each experience entry must have AT LEAST the same number of bullet points as the original. Add more if needed.
-2. MINIMUM BULLETS: Every experience/project must have 3-6 detailed, impactful bullet points.
+1. EXPAND, NEVER REDUCE: Each experience entry must meet the contract-density minimums below and must never have fewer bullets than the original.
+2. SUMMARY DEPTH: Professional summary must be a dense newline-separated list of points, not a short paragraph.
 3. PRESERVE ALL: Keep all original experiences, projects, education, and certifications. Do not remove anything.
-4. ENHANCE QUALITY: Make every bullet point more impactful, not fewer bullets.
+4. ENHANCE QUALITY: Make every bullet point more specific and substantial while maintaining or increasing quantity.
+
+${buildContractDensityInstructions(currentResume)}
+
+${buildAuthenticityInstructions(currentResume, targetRole)}
 
 ═══════════════════════════════════════════════════════════════════════════════
 ACTION VERBS (Start EVERY bullet with one of these):
@@ -284,11 +329,10 @@ TRANSFORMATION INSTRUCTIONS:
 ═══════════════════════════════════════════════════════════════════════════════
 1. **HEADLINE**: Rewrite to match the target role exactly (e.g., "Machine Learning Engineer" not "Software Developer")
 
-2. **SUMMARY**: Completely rewrite (3-4 sentences) to:
-   - Lead with years of experience + target role title
-   - Highlight 3-4 most relevant technical skills
-   - Mention scale/impact metrics
-   - Express passion for the target domain
+2. **SUMMARY**: Completely rewrite as contract-resume professional summary points:
+   - Return one point per newline in the summary string.
+   - Cover years of experience, target role title, primary domains, key technologies, delivery ownership, scale, impact, collaboration, and contract-role readiness.
+   - Make each point concrete and ATS-aligned; do not compress the summary down to a short paragraph.
 
 3. **JOB TITLES**: Where truthful, reframe titles to highlight relevant aspects (e.g., "Backend Developer" → "Python Developer" if pivoting to ML)
 
@@ -299,7 +343,7 @@ TRANSFORMATION INSTRUCTIONS:
    - Add metrics and quantifiable achievements
    - Use strong action verbs
 
-5. **SKILLS**: 
+5. **SKILLS**:
    - Add relevant skills the candidate likely has but didn't emphasize
    - Reorganize to put target-role skills FIRST
    - Group by category (Languages, Frameworks, Tools, Cloud, Databases)
@@ -370,10 +414,14 @@ FIELDS TO PRESERVE EXACTLY:
 ═══════════════════════════════════════════════════════════════════════════════
 CRITICAL CONTENT RULES (MUST FOLLOW):
 ═══════════════════════════════════════════════════════════════════════════════
-1. EXPAND, NEVER REDUCE: Each experience entry must have AT LEAST the same number of bullet points as the original. Add more if the original has fewer than 4.
-2. MINIMUM BULLETS: Every experience/project must have 4-6 detailed, impactful bullet points.
+1. EXPAND, NEVER REDUCE: Each experience entry must meet the contract-density minimums below and must never have fewer bullets than the original.
+2. SUMMARY DEPTH: Professional summary must be a dense newline-separated list of points, not a short paragraph.
 3. PRESERVE ALL: Keep all original experiences, projects, education, and certifications. Do not remove anything.
-4. ENHANCE QUALITY: Make every bullet point more impactful while maintaining or increasing quantity.
+4. ENHANCE QUALITY: Make every bullet point more specific and substantial while maintaining or increasing quantity.
+
+${buildContractDensityInstructions(currentResume)}
+
+${buildAuthenticityInstructions(currentResume, jobDescription)}
 
 ═══════════════════════════════════════════════════════════════════════════════
 ACTION VERBS (Start EVERY bullet with one of these):
@@ -405,12 +453,13 @@ Include metrics that demonstrate impact:
 - User Impact: "Served 2M+ active users", "Improved user retention by 25%"
 
 ═══════════════════════════════════════════════════════════════════════════════
-SUMMARY REQUIREMENTS (3-4 impactful sentences):
+SUMMARY REQUIREMENTS (CONTRACT-RESUME POINTS):
 ═══════════════════════════════════════════════════════════════════════════════
-- Sentence 1: Years of experience + role title matching JD + primary domain
-- Sentence 2: Key technical skills that match JD requirements (list 4-5 specific technologies)
-- Sentence 3: Scale/impact metrics from career highlights
-- Sentence 4: Soft skills + what you bring to the role
+- Return one professional summary point per newline in the summary string.
+- Cover years of experience + role title matching JD + primary domain.
+- Cover key technical skills that match JD requirements across multiple points.
+- Cover scale/impact metrics, delivery ownership, cross-functional work, and contract-role readiness.
+- Do not compress the summary to a short sentence block or a single paragraph.
 
 ═══════════════════════════════════════════════════════════════════════════════
 STRICT RULES:
@@ -482,7 +531,10 @@ Top Skills: ${(resumeContext.skills || []).slice(0, 10).join(', ')}
 
 TASK:
 Refactor the following highlights to align with the candidate's persona.
-Make them 25-50% more impactful using strong action verbs.
+Preserve the exact number of highlights from the input array.
+Expand thin highlights into substantial, specific bullets using strong action verbs.
+Target ${CONTRACT_DENSITY.bulletTargetMinWords}-${CONTRACT_DENSITY.bulletTargetMaxWords} words per highlight so each one visually wraps to about two resume lines.
+Do not merge, drop, or split highlights.
 
 BASE HIGHLIGHTS:
 ${JSON.stringify(baseHighlights, null, 2)}
@@ -503,7 +555,8 @@ async function editField(aiClient, model, provider, currentValue, userPrompt, fi
     Rules:
     - Maintain a professional, executive tone.
     - Focus on achievements and impact.
-    - Keep it concise (3-4 sentences max unless asked otherwise).
+    - Preserve or expand newline-separated summary points unless the user explicitly asks for a concise paragraph.
+    - For contract resumes, target ${CONTRACT_DENSITY.summaryMinPoints}-${CONTRACT_DENSITY.summaryTargetMaxPoints} summary points with one point per newline.
     - Return ONLY the new summary text.`,
     
     experience_position: `Rewrite this job title to be more standard or impressive, based on the user's request.
@@ -523,7 +576,7 @@ async function editField(aiClient, model, provider, currentValue, userPrompt, fi
     Rules:
     - Use strong action verbs (e.g., Spearheaded, Engineered, Optimized).
     - Quantify results where possible or asked.
-    - Keep it impactful and concise.
+    - Target ${CONTRACT_DENSITY.bulletTargetMinWords}-${CONTRACT_DENSITY.bulletTargetMaxWords} words so the bullet visually wraps to about two resume lines.
     - Return ONLY the new bullet point text.`,
     
     skill: `Rewrite this skill or skill list based on the user's request.
@@ -687,16 +740,17 @@ Return ONLY a single JSON object with this exact shape:
   "summary": "",
   "experience": [{ "company": "", "position": "", "location": "", "startDate": "YYYY-MM", "endDate": "YYYY-MM or Present", "highlights": [] }],
   "education": [{ "institution": "", "degree": "", "location": "", "graduationDate": "YYYY-MM", "gpa": "", "highlights": [] }],
-  "skills": { "languages": [], "frameworks": [], "tools": [], "databases": [], "other": [] },
+  "skills": [ { "label": "Programming Languages", "items": ["Python", "SQL"] }, { "label": "Cloud Platforms", "items": ["AWS EC2", "S3"] } ],
   "projects": [{ "name": "", "description": "", "technologies": [], "highlights": [] }],
   "certifications": [{ "name": "", "issuer": "", "date": "YYYY-MM" }],
   "customSections": [{ "id": "publications", "title": "Publications", "content": "markdown text..." }]
 }
 
 RULES:
-- Extract content only. Do not infer, preserve, or describe visual formatting from the uploaded file.
-- "summary" should contain concise professional summary points separated by newlines when there are multiple points.
-- "skills" category order should follow the uploaded resume when possible.
+- Extract ALL content verbatim. Do not summarize, condense, paraphrase, or omit any bullet points, highlights, or descriptions.
+- Every bullet point in the original resume must appear as a separate string in the relevant highlights[] array. Do not merge or drop any bullets.
+- "summary" should contain the full professional summary text; if it is a list of points, separate them with newlines.
+- "skills" MUST be an array of objects, one per category exactly as they appear in the resume. Use the original category label from the resume (e.g. "AI/ML & GenAI", "Cloud Platforms", "Python Libraries"). Preserve category order. Do NOT collapse into generic buckets like languages/frameworks/tools.
 - "customSections" should include ONLY sections that are NOT one of {summary, experience, education, skills, projects, certifications, internships, hackathons}. Keep custom section content as plain text / markdown.
 
 Return ONLY valid JSON. No prose, no markdown fences.`;
@@ -764,12 +818,30 @@ Return ONLY valid JSON. No prose, no markdown fences.`;
     return { content: parsed, layout: {} };
   };
 
+  // Convert skills from array [{label, items}] to keyed object {label: items}
+  // so the rest of the app (renderer, editor, export) can use Object.entries().
+  const normalizeSkills = (skills) => {
+    if (!skills) return {};
+    // Already a keyed object (e.g. from Gemini path or legacy retry)
+    if (!Array.isArray(skills)) return skills;
+    // Use the original label directly as the key so:
+    // 1. Display label exactly matches the resume (no camelCase mangling)
+    // 2. JS object insertion order = original resume category order
+    const obj = {};
+    for (const entry of skills) {
+      if (!entry || !entry.label) continue;
+      const key = String(entry.label).trim() || 'Other';
+      obj[key] = Array.isArray(entry.items) ? entry.items.filter(Boolean) : [];
+    }
+    return obj;
+  };
+
   const finalize = (content) => {
     const merged = {
       ...defaultContent,
       ...content,
       personalInfo: { ...defaultContent.personalInfo, ...(content?.personalInfo || {}) },
-      skills: { ...defaultContent.skills, ...(content?.skills || {}) },
+      skills: normalizeSkills(content?.skills),
       customSections: Array.isArray(content?.customSections) ? content.customSections : [],
     };
     return { content: merged, layout: {} };
@@ -824,7 +896,7 @@ Return ONLY valid JSON. No prose, no markdown fences.`;
   "summary": "",
   "experience": [{ "company": "", "position": "", "location": "", "startDate": "YYYY-MM", "endDate": "YYYY-MM or Present", "highlights": [] }],
   "education": [{ "institution": "", "degree": "", "location": "", "graduationDate": "YYYY-MM", "gpa": "", "highlights": [] }],
-  "skills": { "languages": [], "frameworks": [], "tools": [], "databases": [], "other": [] },
+  "skills": [ { "label": "Category Name", "items": ["skill1", "skill2"] } ],
   "projects": [{ "name": "", "description": "", "technologies": [], "highlights": [] }],
   "certifications": [{ "name": "", "issuer": "", "date": "YYYY-MM" }]
 }`;
@@ -873,6 +945,7 @@ Return ONLY valid JSON. No prose, no markdown fences.`;
           },
         ],
         text: { format: RESUME_IMPORT_RESPONSE_FORMAT_OPENAI },
+        max_output_tokens: 16000,
       });
       const rawText = response.output_text || '';
       console.log('OpenAI direct PDF response length:', rawText.length);
@@ -945,8 +1018,8 @@ ${extractedText}`;
     // Use callAIText for text extraction — avoids responseMimeType which can
     // cause Gemini to return the schema template with empty placeholder values.
     const responseText = await callAIText(aiClient, model, provider, textPrompt, provider === 'openai'
-      ? { textFormat: RESUME_IMPORT_RESPONSE_FORMAT_OPENAI }
-      : {});
+      ? { textFormat: RESUME_IMPORT_RESPONSE_FORMAT_OPENAI, maxOutputTokens: 16000 }
+      : { maxOutputTokens: 65536 });
     console.log('Text extraction response length:', responseText?.length || 0);
     let content;
     try {
@@ -954,10 +1027,10 @@ ${extractedText}`;
     } catch (parseErr) {
       // Retry once with simpler content-only prompt (no wrapper, no layout)
       console.log('Wrapper parse failed, retrying with simpler prompt:', parseErr.message);
-      const simplePrompt = `Extract resume data from the following text. Return ONLY a valid JSON object — no prose, no markdown fences — with these keys: personalInfo (name, title, email, phone, location, linkedin, github), summary (string), experience (array of {company, position, location, startDate, endDate, highlights[]}), education (array of {institution, degree, location, graduationDate, gpa}), skills ({languages, frameworks, tools, databases, other} — all arrays), projects (array of {name, description, technologies[], highlights[]}), certifications (array of {name, issuer, date}). Fill in the ACTUAL values from the resume text — do not leave any field empty if the information is present.\n\nRESUME TEXT:\n${extractedText}`;
+      const simplePrompt = `Extract resume data from the following text. Return ONLY a valid JSON object — no prose, no markdown fences — with these keys: personalInfo (name, title, email, phone, location, linkedin, github), summary (string), experience (array of {company, position, location, startDate, endDate, highlights[]}), education (array of {institution, degree, location, graduationDate, gpa}), skills (array of {label: string, items: string[]} — one entry per category exactly as it appears in the resume, preserving original category names), projects (array of {name, description, technologies[], highlights[]}), certifications (array of {name, issuer, date}). Fill in the ACTUAL values from the resume text — do not leave any field empty if the information is present.\n\nRESUME TEXT:\n${extractedText}`;
       const retryText = await callAIText(aiClient, model, provider, simplePrompt, provider === 'openai'
-        ? { textFormat: RESUME_IMPORT_RESPONSE_FORMAT_OPENAI }
-        : {});
+        ? { textFormat: RESUME_IMPORT_RESPONSE_FORMAT_OPENAI, maxOutputTokens: 16000 }
+        : { maxOutputTokens: 65536 });
       ({ content } = parseWrapper(retryText));
     }
     if (!content || (!content.personalInfo && !content.experience && !content.summary)) {
@@ -1384,15 +1457,59 @@ function parseStrictJson(text) {
  * Generate a recruiter outreach email from a tailored resume + JD.
  * Returns { recipientEmail, recipientName, subject, body, confidence }.
  */
+function normalizeOutreachSubject(subject = '') {
+  return String(subject || '')
+    .replace(/[–—−]/g, '-')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[^\S\r\n]+/g, ' ')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
+function extractWorkAuthorizationSignal(tailoredResume = {}, userProfile = {}) {
+  const explicit = userProfile?.workAuthorization || userProfile?.visaStatus || userProfile?.visaType;
+  if (explicit) return String(explicit).trim();
+
+  const skills = tailoredResume?.skills || {};
+  const skillText = Array.isArray(skills)
+    ? skills.flatMap((entry) => [entry?.label, ...(entry?.items || [])]).join(' ')
+    : Object.entries(skills).flatMap(([label, items]) => [label, ...(Array.isArray(items) ? items : [])]).join(' ');
+  const resumeText = [
+    tailoredResume?.summary,
+    tailoredResume?.personalInfo?.title,
+    skillText,
+    ...(tailoredResume?.experience || []).flatMap((exp) => [
+      exp?.position,
+      exp?.company,
+      ...(exp?.highlights || []),
+    ]),
+  ].filter(Boolean).join(' ');
+
+  const patterns = [
+    { re: /\bH[-\s]?1B\b/i, label: 'H-1B' },
+    { re: /\bH[-\s]?4\s*EAD\b/i, label: 'H-4 EAD' },
+    { re: /\bGC\s*EAD\b/i, label: 'GC EAD' },
+    { re: /\bOPT\b/i, label: 'OPT' },
+    { re: /\bCPT\b/i, label: 'CPT' },
+    { re: /\bGreen Card\b/i, label: 'Green Card' },
+    { re: /\bUS Citizen\b/i, label: 'US Citizen' },
+  ];
+  return patterns.find((item) => item.re.test(resumeText))?.label || '';
+}
+
 async function generateRecruiterEmail(aiClient, model, provider, jobDescription, tailoredResume, userProfile) {
   const name = userProfile?.name || 'Candidate';
   const email = userProfile?.email || '';
+  const workAuthorization = extractWorkAuthorizationSignal(tailoredResume, userProfile);
 
   const prompt = `You are an expert career coach helping a candidate write a concise, professional outreach email to a recruiter for a specific job posting.
 
 CANDIDATE:
 Name: ${name}
 Email: ${email}
+Work authorization / visa signal if known: ${workAuthorization || 'Not provided'}
 
 TAILORED RESUME (compact):
 ${JSON.stringify({
@@ -1412,9 +1529,14 @@ ${jobDescription}
 TASKS:
 1. Extract the most likely recruiter / hiring manager email address from the JD. Look for "apply to", "send resume to", "contact:", an explicit @ in body, etc. If multiple candidates exist, pick the most specific. If NONE is present, return null.
 2. Extract recruiter / hiring manager name if mentioned, else null.
-3. Write a SHORT (120-180 words), warm, professional email:
-   - Subject: clear, includes the role title from the JD.
-   - Body: greets recruiter (use name if known, else "Hi there,"), one-sentence intro, 2-3 concrete resume highlights aligned with the JD requirements (with numbers when present), one sentence on enthusiasm/fit, sign-off with the candidate's name and email. Plain text, no markdown.
+3. Write a polished recruiter outreach email:
+   - Subject: ASCII only. Use a normal hyphen "-", never an en dash, em dash, smart quote, emoji, bullet, or decorative symbol. Keep it under 90 characters and include the role title plus 2-3 relevant strengths.
+   - Body: exactly 2-3 short sentences, 70-115 words total, one paragraph, plain text only.
+   - Sentence 1 should greet the recruiter by first name if known and introduce the candidate, target role, seniority, and core fit.
+   - Sentence 2 should give one concrete, resume-backed reason the candidate matches the JD, using specific technologies/domain terms without sounding keyword-stuffed.
+   - Sentence 3 should mention the attached resume and invite next steps. If work authorization / visa is known, include it neutrally in this sentence, e.g. "I am currently on H-1B work authorization." Do not overemphasize visa status.
+   - Do not use awkward phrases like "Please reach out to me", "discuss Further", "I hope this email finds you well", or "perfect fit".
+   - No bullet points, no lists, no signature block.
 4. Confidence is your 0-100 estimate that the extracted recipient address actually belongs to a recruiter for THIS role.
 
 Return STRICT JSON only:
@@ -1431,6 +1553,13 @@ Return STRICT JSON only:
   const parsed = parseStrictJson(text);
   if (!parsed) {
     throw new Error('Could not parse recruiter email JSON response');
+  }
+  parsed.subject = normalizeOutreachSubject(parsed.subject || '');
+  if (typeof parsed.body === 'string') {
+    parsed.body = parsed.body
+      .replace(/[^\S\r\n]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
   return parsed;
 }
@@ -1491,10 +1620,10 @@ GUIDELINES:
 - If the latest message is incoming, respond to or acknowledge the recruiter's latest note. Do NOT claim that they never replied.
 - If the latest message is outgoing and unanswered, write a gentle follow-up without repeating earlier follow-up wording.
 - Use timing language only when it is accurate. Never say "last week", "a few days ago", or similar unless THREAD TIMING FACTS support it. Usually omit elapsed-time wording when only minutes or hours have passed.
-- Keep it under 90 words. Be specific, calm, and human. No pressure, apology, buzzword list, or repeated resume summary.
-- Mention at most ONE relevant qualification only when it helps the conversation.
+- Write exactly ONE short paragraph (50-70 words). Be calm, specific, and human. No pressure, no apology, no buzzword list, no bullet points.
+- Do NOT add a signature or sign-off — the app appends it automatically.
 - Return only the new email text. Do not quote previous messages.
-- Plain text. Do not add a signature block; the app adds the configured signature.
+- Plain text only.
 - Keep the existing Gmail thread subject, normally "Re: ${originalEmail.subject || latest.subject || ''}".
 
 Return STRICT JSON:
@@ -2452,13 +2581,10 @@ const RESUME_IMPORT_RESPONSE_FORMAT_OPENAI = {
       gpa: strStr,
       highlights: strStrArr,
     })),
-    skills: strObj({
-      languages: strStrArr,
-      frameworks: strStrArr,
-      tools: strStrArr,
-      databases: strStrArr,
-      other: strStrArr,
-    }),
+    skills: strArr(strObj({
+      label: strStr,
+      items: strStrArr,
+    })),
     projects: strArr(strObj({
       name: strStr,
       description: strStr,
@@ -2501,13 +2627,15 @@ You may rewrite:
 Writing rules:
 - The most recent experience must contain the strongest match to the JD stack and responsibilities.
 - Include all major JD technologies and important related terms naturally; do not keyword-stuff.
+- Summary must be ${CONTRACT_DENSITY.summaryMinPoints}-${CONTRACT_DENSITY.summaryTargetMaxPoints} professional summary points, with exactly one point per newline in the summary string. If the base summary has more points, preserve or exceed that count.
 - Use a tapered bullet depth by recency:
   - Most recent experience: 20+ strong bullets, with the densest JD stack coverage.
-  - Second experience: 15+ bullets.
-  - Third experience: 12+ bullets.
-  - Older experiences: 10+ bullets.
-- Each bullet should be specific, plausible, and usually 12-26 words. Split ideas across bullets instead of writing long, padded sentences.
+  - Every other experience: 16+ bullets.
+  - When there are 3+ experience entries, all older experiences combined must have 50+ bullets.
+- Each bullet should be specific, plausible, and usually ${CONTRACT_DENSITY.bulletTargetMinWords}-${CONTRACT_DENSITY.bulletTargetMaxWords} words so it visually wraps to about two resume lines.
 - Prefer concrete delivery language: systems built, APIs shipped, data handled, cloud/services used, reliability, performance, automation, collaboration.
+- Before writing, silently build a per-role stack map. Do not blanket-replace every company with the JD's primary stack; make the latest role the strongest match and make older roles use believable adjacent, legacy, migration, integration, API, testing, cloud, data, or domain work when supported by the base resume.
+- Every bullet must tell a distinct work story. Avoid repeated sentence templates, repeated metric phrasing, and bullets that read like small refactors of each other.
 - Use metrics only when they feel believable. Avoid fake-sounding numbers, generic claims, repeated sentence patterns, and buzzword padding.
 - Remove old-stack emphasis that the JD does not ask for, unless it helps show transferable value.
 - Keep the resume human and recruiter-ready, not like AI-generated marketing copy.
@@ -2538,6 +2666,120 @@ function resolvePersistenceMode(mode) {
   return String(mode || '').trim().toLowerCase() === 'transform' ? 'transform' : 'optimize';
 }
 
+const NAME_ACRONYMS = new Set([
+  'AI', 'ML', 'AWS', 'GCP', 'API', 'APIS', 'SQL', 'NLP', 'LLM', 'RAG', 'MLOPS',
+  'CI', 'CD', 'CRM', 'ERP', 'ETL', 'BI', 'QA', 'SRE', 'IOS', 'UI', 'UX',
+]);
+
+const NAME_TECH_CATALOG = [
+  { name: 'AI_ML', patterns: [/\bAI\s*\/\s*ML\b/i, /\bmachine learning\b/i, /\bML\b/i] },
+  { name: 'GenAI', patterns: [/\bGenAI\b/i, /\bgenerative AI\b/i] },
+  { name: 'LLM', patterns: [/\bLLM(s)?\b/i, /\blarge language model/i] },
+  { name: 'RAG', patterns: [/\bRAG\b/i, /\bretrieval augmented generation/i] },
+  { name: 'Python', patterns: [/\bPython\b/i] },
+  { name: 'AWS', patterns: [/\bAWS\b/i, /\bAmazon Web Services\b/i] },
+  { name: 'Azure', patterns: [/\bAzure\b/i] },
+  { name: 'GCP', patterns: [/\bGCP\b/i, /\bGoogle Cloud\b/i] },
+  { name: 'Dot_Net', patterns: [/\b\.NET\b/i, /\bDot Net\b/i, /\bASP\.NET\b/i] },
+  { name: 'Java', patterns: [/\bJava\b/i] },
+  { name: 'JavaScript', patterns: [/\bJavaScript\b/i, /\bTypeScript\b/i] },
+  { name: 'React', patterns: [/\bReact\b/i] },
+  { name: 'Node_JS', patterns: [/\bNode\.js\b/i, /\bNodeJS\b/i] },
+  { name: 'FastAPI', patterns: [/\bFastAPI\b/i] },
+  { name: 'Docker', patterns: [/\bDocker\b/i] },
+  { name: 'Kubernetes', patterns: [/\bKubernetes\b/i, /\bK8s\b/i] },
+  { name: 'SQL', patterns: [/\bSQL\b/i, /\bPostgres\b/i, /\bPostgreSQL\b/i, /\bMySQL\b/i] },
+  { name: 'Data', patterns: [/\bdata engineering\b/i, /\bdata platform\b/i] },
+  { name: 'Healthcare', patterns: [/\bhealthcare\b/i, /\bhealth care\b/i, /\bHIPAA\b/i] },
+  { name: 'Salesforce', patterns: [/\bSalesforce\b/i] },
+  { name: 'ServiceNow', patterns: [/\bServiceNow\b/i] },
+];
+
+function normalizeNameSpecialTerms(value) {
+  return String(value || '')
+    .replace(/\bAI\s*\/\s*ML\b/gi, ' AI ML ')
+    .replace(/\b\.NET\b/gi, ' Dot Net ')
+    .replace(/\bASP\.NET\b/gi, ' ASP Dot Net ')
+    .replace(/\bC#\b/gi, ' C Sharp ')
+    .replace(/\bC\+\+\b/gi, ' C Plus Plus ')
+    .replace(/\bNode\.js\b/gi, ' Node JS ')
+    .replace(/\bCI\s*\/\s*CD\b/gi, ' CI CD ');
+}
+
+function titleNameToken(token) {
+  const upper = String(token || '').toUpperCase();
+  if (NAME_ACRONYMS.has(upper)) return upper === 'APIS' ? 'API' : upper;
+  if (/^\d+$/.test(token)) return token;
+  return `${token.charAt(0).toUpperCase()}${token.slice(1).toLowerCase()}`;
+}
+
+function tokenizeNamePart(value) {
+  return normalizeNameSpecialTerms(value)
+    .replace(/&/g, ' and ')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((token) => !['with', 'using', 'for', 'and', 'the', 'a', 'an', 'to'].includes(token.toLowerCase()))
+    .map(titleNameToken);
+}
+
+function compactGeneratedName(tokens) {
+  return tokens
+    .join('_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+}
+
+function cleanGeneratedRoleTitle(value) {
+  return String(value || '').split(/\s+(?:with|using|for)\s+/i)[0].split(/\s+-\s+/)[0].trim();
+}
+
+function collectGeneratedNameText(generatedResume = {}, jobDescription = '') {
+  const skills = generatedResume.skills || {};
+  const skillText = Array.isArray(skills)
+    ? skills.flatMap((entry) => [entry?.label, ...((entry?.items) || [])]).join(' ')
+    : Object.entries(skills).flatMap(([label, items]) => [label, ...(Array.isArray(items) ? items : [])]).join(' ');
+
+  return [
+    generatedResume.metadata?.targetPersonaTitle,
+    ...((generatedResume.metadata?.atsKeywordsCovered) || []),
+    generatedResume.personalInfo?.title,
+    generatedResume.summary,
+    skillText,
+    jobDescription,
+  ].filter(Boolean).join(' ');
+}
+
+function buildStandardGeneratedResumeName({
+  sourceName = '',
+  mode = 'optimize',
+  generatedResume = {},
+  jobDescription = '',
+}) {
+  const roleTitle = cleanGeneratedRoleTitle(
+    generatedResume.metadata?.targetPersonaTitle
+      || generatedResume.personalInfo?.title
+      || sourceName
+      || (mode === 'transform' ? 'Transformed Resume' : 'Optimized Resume')
+  );
+  const roleTokens = tokenizeNamePart(roleTitle).slice(0, 5);
+  const roleName = compactGeneratedName(roleTokens);
+  const roleLower = roleName.toLowerCase();
+  const text = collectGeneratedNameText(generatedResume, jobDescription);
+  const techTokens = [];
+
+  for (const item of NAME_TECH_CATALOG) {
+    if (roleLower.includes(item.name.toLowerCase())) continue;
+    if (item.patterns.some((pattern) => pattern.test(text))) techTokens.push(item.name);
+    if (techTokens.length >= 3) break;
+  }
+
+  return compactGeneratedName([...roleTokens, ...techTokens])
+    || (mode === 'transform' ? 'Transformed_Resume' : 'Optimized_Resume');
+}
+
 const GENERIC_PHRASES = ['various projects', 'multiple technologies', 'various technologies', 'multiple projects'];
 
 /**
@@ -2552,10 +2794,10 @@ function checkBulletQuality(bullets, label, softIssues) {
     const text = String(raw ?? '').trim();
     if (!text) return;
     const words = text.split(/\s+/).filter(Boolean);
-    if (words.length < 12) {
+    if (words.length < CONTRACT_DENSITY.bulletValidatorMinWords) {
       softIssues.push(`bullet too short at ${label}[${idx}]: ${words.length} words`);
     }
-    if (words.length > 32) {
+    if (words.length > CONTRACT_DENSITY.bulletValidatorMaxWords) {
       softIssues.push(`bullet too long at ${label}[${idx}]: ${words.length} words`);
     }
     const firstWord = (words[0] || '').replace(/[^a-zA-Z]/g, '').toLowerCase();
@@ -2581,13 +2823,6 @@ function checkBulletQuality(bullets, label, softIssues) {
       softIssues.push(`repetitive bullet openings at ${label}: "${word}" starts ${count}/${bullets.length} bullets`);
     }
   });
-}
-
-function getExperienceBulletRange(index) {
-  if (index === 0) return { min: 16, max: 20 };
-  if (index === 1) return { min: 10, max: 14 };
-  if (index === 2) return { min: 7, max: 10 };
-  return { min: 5, max: 8 };
 }
 
 /**
@@ -2723,6 +2958,10 @@ function validateAgentOutput(original, generated, validationMode = 'jd_first', j
   const skillsValues = Object.values(generated?.skills || {}).flat().filter(Boolean);
   if (skillsValues.length === 0) hardIssues.push('empty skills section');
   if (origExp.length > 0 && genExp.length === 0) hardIssues.push('empty experience section');
+  const densityIssues = validateContractResumeDensity(original, generated);
+  hardIssues.push(...densityIssues.hardIssues);
+  const authenticityIssues = validateResumeAuthenticity(original, generated, jobDescription);
+  softIssues.push(...authenticityIssues.softIssues);
 
   const jdKeywords = extractJdKeywords(jobDescription);
   const genText = flattenResumeText(generated);
@@ -2773,14 +3012,6 @@ function validateAgentOutput(original, generated, validationMode = 'jd_first', j
     if (!Array.isArray(g.highlights)) {
       hardIssues.push(`missing highlights array at "${o.company}"`);
     } else {
-      const gh = g.highlights.length;
-      const range = getExperienceBulletRange(expIndex);
-      if (gh < range.min) {
-        hardIssues.push(`too few bullets at "${o.company}": ${gh} (need ${range.min}-${range.max})`);
-      }
-      if (gh > range.max) {
-        softIssues.push(`too many bullets at "${o.company}": ${gh} (target ${range.min}-${range.max})`);
-      }
       checkBulletQuality(g.highlights, `experience "${o.company}"`, softIssues);
     }
   }
@@ -2866,10 +3097,14 @@ async function repairGeneratedResume({
     `- Do not add degrees or certifications that are not present in the original resume.\n` +
     `- Keep the JD-first role, stack, summary, skills, and bullets strong; do not revert to unrelated base-resume wording.\n` +
     `- Ensure the most recent experience carries the strongest JD stack coverage.\n` +
-    `- Use tapered bullet depth: first experience 20+ bullets, second 15+, third 12+, older roles 10+.\n` +
-    `- Keep bullets specific, realistic, and varied; avoid padding just to reach the count.\n` +
+    `- Keep the summary as ${CONTRACT_DENSITY.summaryMinPoints}-${CONTRACT_DENSITY.summaryTargetMaxPoints}+ newline-separated professional summary points; preserve a higher original count.\n` +
+    `- Use contract bullet depth: first experience 20+ bullets, all other roles 16+, and 50+ combined older-role bullets when the original has 3+ roles.\n` +
+    `- Keep bullets specific, realistic, varied, and ${CONTRACT_DENSITY.bulletTargetMinWords}-${CONTRACT_DENSITY.bulletTargetMaxWords} words when possible; avoid padding just to reach the count.\n` +
+    `- Fix authenticity issues by diversifying the per-role stack chronology; do not make every company look like the same JD-template role.\n` +
+    `- Rewrite near-duplicate bullets so each one has a distinct system, feature, responsibility, business context, technical constraint, collaboration pattern, metric, or operational outcome.\n` +
     `- Improve JD keyword coverage naturally in title, summary, skills, and recent experience.\n` +
     `- Keep metrics plausible and remove generic or AI-sounding phrasing.\n` +
+    `${buildAuthenticityInstructions(originalResume, jobDescription)}\n` +
     `- Return the FULL corrected resume JSON only. No explanations, no code fences.\n\n`;
 
   const repairPrompt =
@@ -2940,6 +3175,7 @@ async function persistGeneratedResumeServerSide({
   jobDescription,
   fieldsToUpdate,
   label,
+  targetResumeName,
   aiTrace,
   aiMetadata,
 }) {
@@ -2970,7 +3206,13 @@ async function persistGeneratedResumeServerSide({
   const isTransformLike = mode === 'transform';
   const suffix = isTransformLike ? 'Transform' : 'Optimized';
   const baseName = sourceData.name || 'Resume';
-  const newName = label || `${baseName} - ${suffix}`;
+  const explicitName = String(targetResumeName || '').trim().slice(0, 140);
+  const newName = explicitName || buildStandardGeneratedResumeName({
+    sourceName: baseName,
+    mode,
+    generatedResume,
+    jobDescription,
+  }) || `${baseName} - ${suffix}`;
 
   const sectionFormats = sourceData.sectionFormats || {
     summary: 'points',
@@ -3048,7 +3290,7 @@ async function persistGeneratedResumeServerSide({
 /**
  * Streaming "AI Agent" callable.
  *
- * Input:  { resume, jobDescription, fieldsToUpdate?, sourceResumeId?, mode?, label? }
+ * Input:  { resume, jobDescription, fieldsToUpdate?, sourceResumeId?, mode?, label?, targetResumeName? }
  * Stream: chunks of shape { type, ...payload } where type is one of
  *           "status" | "thought" | "answer" | "usage" | "validator" | "error" | "persisted"
  * Final:  { resume, metadata, validator, usage, creditsRemaining, aiTrace, newResumeId? }
@@ -3064,6 +3306,7 @@ exports.runResumeAgentStreaming = onCall(
       sourceResumeId,
       mode,
       label,
+      targetResumeName,
     } = request.data || {};
     if (!resume || typeof resume !== 'object') {
       throw new HttpsError('invalid-argument', 'resume is required');
@@ -3143,8 +3386,11 @@ exports.runResumeAgentStreaming = onCall(
       `company locations, dates, education, and existing certifications. Rewrite role title, ` +
       `position titles, summary, skills, projects, and bullets to fit the JD. Do not add ` +
       `degrees or certifications that are not in the base resume. The most recent experience ` +
-      `must carry the strongest match to the JD stack and should have 20+ bullets. Taper older ` +
-      `roles to 15+, then 12+, then 10+ bullets.\n\n` +
+      `must carry the strongest match to the JD stack and should have 20+ bullets. All other ` +
+      `roles should have 16+ bullets. When the base has 3+ experience entries, older roles ` +
+      `combined should have 50+ bullets.\n\n` +
+      `${buildContractDensityInstructions(resume)}\n\n` +
+      `${buildAuthenticityInstructions(resume, jobDescription)}\n\n` +
       `BASE_RESUME:\n${JSON.stringify(resume, null, 2)}\n\n` +
       `<<<JD>>>\n${jobDescription}\n<<</JD>>>\n\n` +
       `Return only the final full resume JSON. Use metadata.selectedMode="transformation".`;
@@ -3390,7 +3636,7 @@ exports.runResumeAgentStreaming = onCall(
     // JSON as answer chunks because the final return already carries it.
     let finalValidator = validator;
     const hasRepairableSoftIssues = validator.softIssues.some((issue) =>
-      /low JD keyword|bullet too short|bullet too long|weak bullet|generic phrasing|duplicate bullet|repetitive bullet|too many bullets/i.test(issue)
+      /low JD keyword|bullet too short|bullet too long|weak bullet|generic phrasing|duplicate bullet|repetitive bullet|too many bullets|target stack overuse|same target stack|high bullet similarity|repeated opening phrase|repeated sentence template|repeated delivery verb/i.test(issue)
     );
     if (!validator.ok || hasRepairableSoftIssues) {
       console.warn(`[agent] validator repair mode=${validationMode} hard=${validator.hardIssues.length} soft=${validator.softIssues.length}`);
@@ -3464,6 +3710,7 @@ exports.runResumeAgentStreaming = onCall(
           jobDescription,
           fieldsToUpdate: fields,
           label,
+          targetResumeName,
           aiTrace,
           aiMetadata: finalResume.metadata || null,
         });

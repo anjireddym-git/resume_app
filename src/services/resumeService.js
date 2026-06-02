@@ -20,6 +20,7 @@ import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 import { DEFAULT_SECTION_ORDER } from '../config/templates';
 import { DEFAULT_LAYOUT_CONFIG, normalizeLayoutConfig } from '../config/layoutSchema';
 import { normalizeSummaryToPoints } from '../lib/summaryUtils';
+import { buildStandardResumeName } from '../lib/resumeNaming';
 
 const DEFAULT_SECTION_FORMATS = {
   summary: 'points',
@@ -372,9 +373,15 @@ export const createGeneratedResume = async (
 ) => {
   if (!sourceResume?.id) throw new Error('Source resume is required');
   const mode = options.mode === 'transform' ? 'transform' : 'optimize';
+  const standardName = buildStandardResumeName({
+    sourceName: sourceResume.name,
+    mode,
+    generatedResumeData,
+    jobDescription: options.jobDescription || '',
+  });
 
   return createResume(userId, sourceResume.groupId, {
-    name: options.name || buildGeneratedResumeName(sourceResume.name, mode),
+    name: options.name || standardName || buildGeneratedResumeName(sourceResume.name, mode),
     summary: generatedResumeData.summary || '',
     experience: generatedResumeData.experience || [],
     skills: generatedResumeData.skills || {},

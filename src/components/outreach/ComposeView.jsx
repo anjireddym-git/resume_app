@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Loader2, Send, FileText, ChevronRight, ChevronLeft,
   CheckCircle2, AlertTriangle, Paperclip, Bell, RefreshCw, ExternalLink,
-  Settings as SettingsIcon, Mail,
+  Settings as SettingsIcon, Mail, Download, Eye, EyeOff,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useCredits } from '../../contexts/CreditsContext';
@@ -16,15 +16,21 @@ import {
   updateResumeMatchAnalysis,
   getUserSettings,
   listEmailTemplates,
+  getResumeGroups,
 } from '../../services/resumeService';
 import { geminiService } from '../../services/geminiService';
-import { generateDocxBlob } from '../../services/exportService';
+import { exportToDOCX, generateDocxBlob } from '../../services/exportService';
 import { sendGmail, validateEmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
 import { analyticsService } from '../../services/analyticsService';
 import AgentThinkingPane from '../AgentThinkingPane';
+import GeneratedDocxPreview from '../GeneratedDocxPreview';
+import { buildOutreachDocxRenderOptions, sanitizeOutreachFilename } from './outreachDocxOptions';
+import ResumeLibraryPicker from './ResumeLibraryPicker';
 
-const STEPS = ['jd', 'pickBase', 'tailor', 'email', 'send', 'done'];
 const AGENT_FIELDS = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'];
+const MIN_OUTREACH_USE_AS_IS_CREDITS = 1;
+const MIN_OUTREACH_TAILOR_CREDITS = 7;
+const STEPS = ['jd', 'pickBase', 'tailor', 'email', 'send', 'done'];
 const STEP_LABEL = {
   jd: 'Job description',
   pickBase: 'Base resume',
@@ -33,9 +39,6 @@ const STEP_LABEL = {
   send: 'Sending',
   done: 'Sent',
 };
-
-const sanitizeFilename = (name) =>
-  String(name || 'Resume').replace(/[^a-zA-Z0-9\s-_]/g, '').replace(/\s+/g, '_').slice(0, 80) || 'Resume';
 
 const appendSignature = (body, signature) => {
   if (!signature || !signature.trim()) return body || '';
@@ -107,12 +110,14 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
   const [jobDescription, setJobDescription] = useState('');
 
   const [allResumes, setAllResumes] = useState([]);
+  const [allGroups, setAllGroups] = useState([]);
   const [loadingResumes, setLoadingResumes] = useState(false);
   const [selectedBaseId, setSelectedBaseId] = useState(null);
   const [baseGroup, setBaseGroup] = useState(null);
 
   const [tailoredResume, setTailoredResume] = useState(null);
   const [newResumeId, setNewResumeId] = useState(null);
+  const [resumeSelectionMode, setResumeSelectionMode] = useState('tailored');
   const [matchAnalysis, setMatchAnalysis] = useState(null);
   const [agentStream, setAgentStream] = useState(null);
 
@@ -120,6 +125,8 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
     to: '', cc: '', bcc: '', subject: '', body: '', recipientName: '', confidence: 0,
   });
   const [showCcBcc, setShowCcBcc] = useState(false);
+  const [showAttachmentPreview, setShowAttachmentPreview] = useState(false);
+  const [downloadingAttachment, setDownloadingAttachment] = useState(false);
 
   const [followUpEnabled, setFollowUpEnabled] = useState(true);
   const [followUpValue, setFollowUpValue] = useState(7);
@@ -145,11 +152,12 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
 
   const reset = () => {
     setStep('jd'); setError(''); setBusy(false);
-    setJobDescription(''); setAllResumes([]); setSelectedBaseId(null);
+    setJobDescription(''); setAllResumes([]); setAllGroups([]); setSelectedBaseId(null);
     setBaseGroup(null); setTailoredResume(null); setNewResumeId(null); setMatchAnalysis(null);
+    setResumeSelectionMode('tailored');
     setAgentStream(null);
     setEmailDraft({ to: '', cc: '', bcc: '', subject: '', body: '', recipientName: '', confidence: 0 });
-    setShowCcBcc(false); setSendResult(null);
+    setShowCcBcc(false); setShowAttachmentPreview(false); setSendResult(null);
     if (settings) {
       setFollowUpEnabled(!!settings.defaultFollowUp.enabled);
       setFollowUpValue(settings.defaultFollowUp.intervalValue ?? settings.defaultFollowUp.intervalDays ?? 7);
@@ -160,25 +168,63 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
 
   const handleSubmitJD = async () => {
     if (!jobDescription.trim()) { setError('Paste a job description to continue.'); return; }
-    if (!hasCredits || credits < 2) {
-      setError('You need at least 2 credits (resume tailor + email draft).');
+    if (!hasCredits || credits < MIN_OUTREACH_USE_AS_IS_CREDITS) {
+      setError('You need at least 1 credit to draft the outreach email.');
       return;
     }
     setError(''); setBusy(true); setStep('pickBase'); setLoadingResumes(true);
     try {
-      const resumes = await getAllResumesForUser(user.uid);
+      const [resumes, groups] = await Promise.all([
+        getAllResumesForUser(user.uid),
+        getResumeGroups(user.uid),
+      ]);
       if (resumes.length === 0) { setError('You have no resumes yet. Create one first.'); setStep('jd'); return; }
       setAllResumes(resumes);
+      setAllGroups(groups);
       setSelectedBaseId(null);
     } catch (err) {
       console.error(err); setError(err.message || 'Failed to load your resumes.'); setStep('jd');
     } finally { setLoadingResumes(false); setBusy(false); }
   };
 
+  const resolveSelectedBase = async () => {
+    if (!selectedBaseId) { setError('Pick a base resume to continue.'); return; }
+    const resume = allResumes.find((item) => item.id === selectedBaseId) || await getResume(selectedBaseId);
+    const group = allGroups.find((item) => item.id === resume.groupId) || await getResumeGroup(resume.groupId);
+    return { resume, group, full: buildFullResume(group, resume) };
+  };
+
+  const handleUseSelectedResumeAsIs = async () => {
+    setError('');
+    setResumeSelectionMode('existing');
+    setBusy(true);
+    try {
+      const selected = await resolveSelectedBase();
+      if (!selected) return;
+      setBaseGroup(selected.group);
+      setTailoredResume(selected.full);
+      setNewResumeId(selected.resume.id);
+      setMatchAnalysis(null);
+      setAgentStream(null);
+      await draftEmail(selected.full);
+    } catch (err) {
+      console.error(err);
+      setError(err.message || 'Failed to prepare the selected resume.');
+      setStep('pickBase');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleConfirmBase = async () => {
     if (!selectedBaseId) { setError('Pick a base resume to continue.'); return; }
+    if (!hasCredits || credits < MIN_OUTREACH_TAILOR_CREDITS) {
+      setError(`Tailoring needs at least ${MIN_OUTREACH_TAILOR_CREDITS} credits. Use the selected resume as-is or add credits.`);
+      return;
+    }
     setError(''); setBusy(true); setStep('tailor');
     setAgentStream(createAgentStreamState());
+    setResumeSelectionMode('tailored');
     const startedAt = Date.now();
     const elapsedTimer = setInterval(() => {
       setAgentStream((state) => state ? { ...state, elapsedMs: Date.now() - startedAt } : state);
@@ -305,6 +351,26 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
   }, [emailDraft.to, ccList, bccList]);
   const canSend = !!emailDraft.to.trim() && validateEmail(emailDraft.to.trim())
     && !!emailDraft.subject.trim() && !!emailDraft.body.trim() && invalidEmails.length === 0;
+  const attachmentRenderOptions = useMemo(
+    () => buildOutreachDocxRenderOptions(baseGroup, tailoredResume),
+    [baseGroup, tailoredResume]
+  );
+  const attachmentFilename = useMemo(() => (
+    `${sanitizeOutreachFilename(user.displayName || 'Resume')}_${sanitizeOutreachFilename(emailDraft.subject || 'Tailored_Resume')}.docx`
+  ), [emailDraft.subject, user.displayName]);
+
+  const handleDownloadAttachment = async () => {
+    if (!tailoredResume) return;
+    setDownloadingAttachment(true);
+    setError('');
+    try {
+      await exportToDOCX(tailoredResume, attachmentFilename, attachmentRenderOptions);
+    } catch (err) {
+      setError(err?.message || 'Could not generate the outreach DOCX attachment.');
+    } finally {
+      setDownloadingAttachment(false);
+    }
+  };
 
   const handleSend = async () => {
     if (!canSend) { setError('Fix the highlighted email fields before sending.'); return; }
@@ -312,8 +378,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
     try {
       const accessToken = await ensureGmailAccess({ withReadonly: followUpEnabled });
       if (!accessToken) throw new Error('Gmail access was not granted.');
-      const blob = await generateDocxBlob(tailoredResume);
-      const filename = `${sanitizeFilename(user.displayName || 'Resume')}_${sanitizeFilename(emailDraft.subject)}.docx`;
+      const blob = await generateDocxBlob(tailoredResume, attachmentRenderOptions);
       const sendResp = await sendGmail({
         accessToken,
         fromEmail: user.email,
@@ -324,7 +389,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
         subject: emailDraft.subject,
         body: emailDraft.body,
         attachment: {
-          filename,
+          filename: attachmentFilename,
           mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
           blob,
         },
@@ -357,7 +422,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
       setSendResult({ sentAppId, gmailMessageId: sendResp.id, gmailThreadId: sendResp.threadId });
       setStep('done');
       analyticsService.trackCreditsUsed('tailor_and_send_sent', 0);
-      if (onResumeCreated) onResumeCreated(newResumeId, baseGroup?.id);
+      if (resumeSelectionMode === 'tailored' && onResumeCreated) onResumeCreated(newResumeId, baseGroup?.id);
     } catch (err) {
       console.error(err);
       if (err instanceof GmailAuthError) {
@@ -370,7 +435,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
   const stepIndex = STEPS.indexOf(step);
 
   return (
-    <div className="max-w-5xl mx-auto p-6 lg:p-8">
+    <div className="max-w-7xl mx-auto p-6 lg:p-8">
       {/* Page header */}
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
@@ -415,9 +480,9 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_18rem] gap-6">
         {/* Main panel */}
-        <div className="lg:col-span-2 bg-white border border-neutral-200 rounded-xl p-5">
+        <div className="bg-white border border-neutral-200 rounded-xl p-5 min-w-0">
           {step === 'jd' && (
             <div className="space-y-3">
               <label className="text-sm font-medium text-neutral-700">Job description</label>
@@ -429,7 +494,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
               />
               <div className="flex items-center justify-between">
                 <p className="text-xs text-neutral-500">
-                  Tailoring uses streaming-agent credits. Match analysis and the draft email use 1 credit each. You choose the base resume next.
+                  Use an existing resume with a draft email from {MIN_OUTREACH_USE_AS_IS_CREDITS} credit, or tailor a new child resume when you have at least {MIN_OUTREACH_TAILOR_CREDITS} credits.
                 </p>
                 <button
                   onClick={handleSubmitJD}
@@ -449,46 +514,45 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
                 <div className="py-12 text-center"><Loader2 className="w-6 h-6 text-neutral-400 animate-spin mx-auto" /></div>
               ) : (
                 <>
-                  <label className="text-sm font-medium text-neutral-700">Choose base resume</label>
-                  <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                    {allResumes.map((r) => {
-                      const isSelected = selectedBaseId === r.id;
-                      return (
-                        <button
-                          key={r.id}
-                          onClick={() => setSelectedBaseId(r.id)}
-                          className={`w-full p-3 rounded-lg border text-left flex items-start gap-3 ${
-                            isSelected ? 'border-blue-500 bg-blue-50' : 'border-neutral-200 hover:border-neutral-300'
-                          }`}
-                        >
-                          <FileText className="w-4 h-4 text-neutral-400 mt-0.5" />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-medium text-neutral-900 truncate">{r.name}</span>
-                            </div>
-                            <div className="text-xs text-neutral-500 truncate">
-                              {r.matchScore != null ? `Stored match ${r.matchScore}%` : 'Ready to tailor for this job'}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
+                  <div>
+                    <h2 className="text-sm font-semibold text-neutral-900">Choose the resume to send</h2>
+                    <p className="text-xs text-neutral-500 mt-1">
+                      Preview the exact resume first, then send it as-is or create a tailored child resume for this job.
+                    </p>
                   </div>
-                  <div className="flex items-center justify-between pt-2">
+                  <ResumeLibraryPicker
+                    groups={allGroups}
+                    resumes={allResumes}
+                    selectedResumeId={selectedBaseId}
+                    onSelectResume={setSelectedBaseId}
+                    loading={loadingResumes}
+                  />
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 pt-2">
                     <button
                       onClick={() => setStep('jd')}
                       className="h-9 px-3 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-100 flex items-center gap-1.5"
                     >
                       <ChevronLeft className="w-4 h-4" /> Back
                     </button>
-                    <button
-                      onClick={handleConfirmBase}
-                      disabled={busy || !selectedBaseId}
-                      className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-                    >
-                      {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}
-                      Tailor & draft email
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <button
+                        onClick={handleUseSelectedResumeAsIs}
+                        disabled={busy || !selectedBaseId}
+                        className="h-10 px-4 border border-neutral-200 bg-white text-neutral-800 rounded-lg text-sm font-medium hover:bg-neutral-50 disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        {busy && resumeSelectionMode === 'existing' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+                        Use as-is & draft email
+                      </button>
+                      <button
+                        onClick={handleConfirmBase}
+                        disabled={busy || !selectedBaseId || credits < MIN_OUTREACH_TAILOR_CREDITS}
+                        title={credits < MIN_OUTREACH_TAILOR_CREDITS ? `Tailoring needs at least ${MIN_OUTREACH_TAILOR_CREDITS} credits` : undefined}
+                        className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        {busy && resumeSelectionMode === 'tailored' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}
+                        Tailor & draft email
+                      </button>
+                    </div>
                   </div>
                 </>
               )}
@@ -628,9 +692,38 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
               </div>
 
               <div className="flex items-center gap-2 text-xs text-neutral-600 p-2 bg-neutral-50 border border-neutral-200 rounded-lg">
-                <Paperclip className="w-3.5 h-3.5" />
-                Attachment: <strong>tailored resume.docx</strong> (generated on send)
+                <Paperclip className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  Attachment: <strong>{attachmentFilename}</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowAttachmentPreview((v) => !v)}
+                  className="h-7 px-2 rounded border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 inline-flex items-center gap-1"
+                >
+                  {showAttachmentPreview ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  {showAttachmentPreview ? 'Hide' : 'Preview'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadAttachment}
+                  disabled={downloadingAttachment || !tailoredResume}
+                  className="h-7 px-2 rounded border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center gap-1"
+                >
+                  {downloadingAttachment ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  DOCX
+                </button>
               </div>
+
+              {showAttachmentPreview && tailoredResume && (
+                <div className="h-[520px] overflow-hidden rounded-lg border border-neutral-200 bg-white">
+                  <GeneratedDocxPreview
+                    resumeData={tailoredResume}
+                    renderOptions={attachmentRenderOptions}
+                    debounceMs={100}
+                  />
+                </div>
+              )}
 
               <div className="border border-neutral-200 rounded-lg p-3 space-y-2">
                 <label className="flex items-center gap-2 text-sm font-medium text-neutral-700">

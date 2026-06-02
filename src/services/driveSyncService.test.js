@@ -5,8 +5,8 @@ const driveMocks = vi.hoisted(() => ({
   ensureGroupFolder: vi.fn(),
   getFile: vi.fn(),
   renameFile: vi.fn(),
-  updateHtmlContent: vi.fn(),
-  uploadHtmlAsGoogleDoc: vi.fn(),
+  updateDocxContent: vi.fn(),
+  uploadDocxAsGoogleDoc: vi.fn(),
 }));
 
 const resumeMocks = vi.hoisted(() => ({
@@ -21,8 +21,10 @@ vi.mock('./googleDriveService', async (importOriginal) => ({
   ...(await importOriginal()),
   ...driveMocks,
 }));
-vi.mock('./driveMirrorHtmlService', () => ({
-  generateDriveMirrorHtmlBlob: vi.fn(() => new Blob(['resume'], { type: 'text/html; charset=UTF-8' })),
+vi.mock('./exportService', () => ({
+  generateDocxBlob: vi.fn(async () => new Blob(['resume'], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  })),
 }));
 vi.mock('./resumeService', () => resumeMocks);
 
@@ -38,7 +40,7 @@ describe('driveSyncService', () => {
     vi.clearAllMocks();
     resumeMocks.getResumeGroup.mockResolvedValue(group);
     driveMocks.ensureGroupFolder.mockResolvedValue({ rootId: 'root-1', folderId: 'folder-1' });
-    driveMocks.uploadHtmlAsGoogleDoc.mockResolvedValue({
+    driveMocks.uploadDocxAsGoogleDoc.mockResolvedValue({
       id: 'file-1',
       webViewLink: 'https://docs.google.com/file-1',
     });
@@ -54,7 +56,7 @@ describe('driveSyncService', () => {
       resumeData: {},
       sectionOrder: [],
     });
-    expect(driveMocks.uploadHtmlAsGoogleDoc).toHaveBeenCalledOnce();
+    expect(driveMocks.uploadDocxAsGoogleDoc).toHaveBeenCalledOnce();
     expect(resumeMocks.updateResumeDriveSync).toHaveBeenCalledWith('resume-1', expect.objectContaining({ driveFileId: 'file-1' }));
   });
 
@@ -95,7 +97,7 @@ describe('driveSyncService', () => {
 
   it('coalesces overlapping first uploads without creating duplicate Docs', async () => {
     let releaseUpload;
-    driveMocks.uploadHtmlAsGoogleDoc.mockImplementationOnce(() => new Promise((resolve) => {
+    driveMocks.uploadDocxAsGoogleDoc.mockImplementationOnce(() => new Promise((resolve) => {
       releaseUpload = () => resolve({ id: 'file-1', webViewLink: 'https://docs.google.com/file-1' });
     }));
     driveMocks.getFile.mockResolvedValue({ id: 'file-1', name: 'Backend Engineer', trashed: false });
@@ -106,8 +108,8 @@ describe('driveSyncService', () => {
     releaseUpload();
     await Promise.all([first, second]);
 
-    expect(driveMocks.uploadHtmlAsGoogleDoc).toHaveBeenCalledTimes(1);
-    expect(driveMocks.updateHtmlContent).toHaveBeenCalledTimes(1);
+    expect(driveMocks.uploadDocxAsGoogleDoc).toHaveBeenCalledTimes(1);
+    expect(driveMocks.updateDocxContent).toHaveBeenCalledTimes(1);
   });
 
   it('drains queued document deletions after authorization', async () => {

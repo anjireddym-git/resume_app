@@ -96,7 +96,7 @@ const ResizableSplitPane = ({
   const actualRightWidth = isRightHidden ? 0 : isLeftHidden ? 100 : 100 - leftWidth;
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
+    <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
       {/* Toggle Bar */}
       <div className="h-8 bg-neutral-100 border-b border-neutral-200 flex items-center justify-center gap-2 px-4 flex-shrink-0">
         <div className="flex items-center gap-1">
@@ -147,7 +147,7 @@ const ResizableSplitPane = ({
       {/* Split Pane Content */}
       <div 
         ref={containerRef}
-        className="flex-1 flex overflow-hidden relative"
+        className="flex-1 min-w-0 flex overflow-hidden relative"
       >
         {/* Drag Overlay - captures all mouse events during drag */}
         {isDragging && (
@@ -157,7 +157,7 @@ const ResizableSplitPane = ({
         {/* Left Panel */}
         {!isLeftHidden && (
           <div 
-            className={`overflow-hidden flex flex-col ${isDragging ? '' : 'transition-all duration-200'}`}
+            className={`min-w-0 overflow-hidden flex flex-col ${isDragging ? '' : 'transition-all duration-200'}`}
             style={{ width: `${actualLeftWidth}%` }}
           >
             {left}
@@ -183,7 +183,7 @@ const ResizableSplitPane = ({
         {/* Right Panel */}
         {!isRightHidden && (
           <div 
-            className={`overflow-hidden flex flex-col ${isDragging ? '' : 'transition-all duration-200'}`}
+            className={`min-w-0 overflow-hidden flex flex-col ${isDragging ? '' : 'transition-all duration-200'}`}
             style={{ width: `${actualRightWidth}%` }}
           >
             {right}

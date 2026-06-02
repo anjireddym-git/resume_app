@@ -2,9 +2,12 @@ import React from 'react';
 import { webClasses } from '../../styles/theme';
 
 function formatSkillLabel(key) {
-  return String(key || '')
-    .replace(/[-_]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase());
+  const s = String(key || '').replace(/[-_]+/g, ' ').trim();
+  // If the key already looks like a human-readable label (contains spaces or
+  // mixed/upper case letters), return it as-is so "AI/ML & GenAI" stays intact.
+  if (/\s|[A-Z]/.test(s)) return s;
+  // Otherwise it's a legacy camelCase key — title-case each word.
+  return s.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function getSkillCategories(skills = {}) {

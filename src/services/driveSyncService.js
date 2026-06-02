@@ -9,10 +9,10 @@ import {
   ensureGroupFolder,
   getFile,
   renameFile,
-  updateHtmlContent,
-  uploadHtmlAsGoogleDoc,
+  updateDocxContent,
+  uploadDocxAsGoogleDoc,
 } from './googleDriveService';
-import { generateDriveMirrorHtmlBlob } from './driveMirrorHtmlService';
+import { generateDocxBlob } from './exportService';
 import {
   getDriveCleanupQueue,
   getResumeGroup,
@@ -63,12 +63,19 @@ async function ensureCurrentGroupFolder(getAccessToken, group) {
   return { folderId, rootId };
 }
 
-export async function syncResumeToDrive({ getAccessToken, group, resume, resumeData, sectionOrder }) {
+export async function syncResumeToDrive({ getAccessToken, group, resume, resumeData, sectionOrder, renderOptions: renderOptionsOverride }) {
   if (!group?.id) throw new Error('Group is required to sync to Drive');
   if (!resume?.id) throw new Error('Resume is required to sync to Drive');
 
   const { folderId } = await ensureCurrentGroupFolder(getAccessToken, group);
-  const mirrorBlob = generateDriveMirrorHtmlBlob(resumeData, sectionOrder);
+  const renderOptions = renderOptionsOverride || {
+    sectionOrder,
+    themeConfig: group.themeConfig,
+    visibleSections: group.visibleSections,
+    sectionFormats: resumeData?.sectionFormats || {},
+    customSectionDefs: group.customSectionDefs || resumeData?.customSectionDefs || [],
+  };
+  const mirrorBlob = await generateDocxBlob(resumeData, renderOptions);
   const fileName = safeFileName(resume.name);
   let fileId = resume.driveFileId;
   let webViewLink = resume.driveWebViewLink || null;
@@ -80,7 +87,7 @@ export async function syncResumeToDrive({ getAccessToken, group, resume, resumeD
       if (existing.trashed) {
         fileId = null;
       } else {
-        await updateHtmlContent(getAccessToken, fileId, mirrorBlob);
+        await updateDocxContent(getAccessToken, fileId, mirrorBlob);
         if (existing.name !== fileName) await renameFile(getAccessToken, fileId, fileName);
         webViewLink = existing.webViewLink || webViewLink;
       }
@@ -94,7 +101,7 @@ export async function syncResumeToDrive({ getAccessToken, group, resume, resumeD
   }
 
   if (!fileId) {
-    const uploaded = await uploadHtmlAsGoogleDoc(getAccessToken, mirrorBlob, fileName, folderId);
+    const uploaded = await uploadDocxAsGoogleDoc(getAccessToken, mirrorBlob, fileName, folderId);
     fileId = uploaded.id;
     webViewLink = uploaded.webViewLink;
     created = true;

@@ -54,6 +54,7 @@ export const DEFAULT_THEME_CONFIG = {
   // Content Styling
   content: {
     bulletStyle: '•', // •, -, ▸, ▪, >, ★, ◆
+    bulletColor: 'text', // text, accent, secondary
     dateAlign: 'right', // right, below, inline
     dateFormat: 'MMM YYYY', // MMM YYYY, MM/YYYY, MMMM YYYY, YYYY
     showLocation: true, // Show location in experience
@@ -249,11 +250,21 @@ export const THEME_OPTIONS = {
     { label: 'Star (★)', value: '★' },
     { label: 'Diamond (◆)', value: '◆' },
   ],
+  bulletColors: [
+    { label: 'Text', value: 'text' },
+    { label: 'Accent', value: 'accent' },
+    { label: 'Secondary', value: 'secondary' },
+  ],
   dateFormats: [
     { label: 'Jan 2024', value: 'MMM YYYY' },
     { label: '01/2024', value: 'MM/YYYY' },
     { label: 'January 2024', value: 'MMMM YYYY' },
     { label: '2024', value: 'YYYY' },
+  ],
+  datePositions: [
+    { label: 'Right', value: 'right' },
+    { label: 'Below', value: 'below' },
+    { label: 'Inline', value: 'inline' },
   ],
   densities: [
     { label: 'Spacious', value: 'spacious', description: 'More breathing room' },

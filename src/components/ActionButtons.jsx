@@ -8,7 +8,7 @@ const ActionButtons = ({
   resumeData,
   onReset,
   hasChanges,
-  sectionOrder,
+  renderOptions,
   currentResume,
 }) => {
   const [isExportingDOCX, setIsExportingDOCX] = useState(false);
@@ -30,7 +30,7 @@ const ActionButtons = ({
     }
     setIsExportingDOCX(true);
     try {
-      await exportToDOCX(resumeData, getFileName(), sectionOrder);
+      await exportToDOCX(resumeData, getFileName(), renderOptions);
       analyticsService.trackExportDOCX(resumeData?.id);
     } catch (error) {
       console.error('DOCX export failed:', error);
