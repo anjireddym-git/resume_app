@@ -18,6 +18,7 @@ import {
   filterResumeTree,
   sortResumes,
 } from '../../lib/resumeTree';
+import { calculateRuleBasedMatch, getRuleMatchToneClass } from '../../lib/ruleBasedMatch';
 import GeneratedDocxPreview from '../GeneratedDocxPreview';
 import { buildOutreachDocxRenderOptions } from './outreachDocxOptions';
 
@@ -27,6 +28,7 @@ const ResumeLibraryPicker = ({
   selectedResumeId,
   onSelectResume,
   loading = false,
+  jobDescription = '',
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedGroups, setExpandedGroups] = useState({});
@@ -56,6 +58,17 @@ const ResumeLibraryPicker = ({
   const selectedRenderOptions = selectedFullResume && selectedGroup
     ? buildOutreachDocxRenderOptions(selectedGroup, selectedFullResume)
     : null;
+  const ruleMatchesByResumeId = useMemo(() => {
+    if (!jobDescription.trim()) return new Map();
+    const map = new Map();
+    for (const resume of resumes) {
+      const group = groupById.get(resume.groupId);
+      if (!group) continue;
+      const match = calculateRuleBasedMatch(jobDescription, buildFullResume(group, resume));
+      if (match) map.set(resume.id, match);
+    }
+    return map;
+  }, [groupById, jobDescription, resumes]);
 
   useEffect(() => {
     if (groups.length === 0) return;
@@ -96,6 +109,14 @@ const ResumeLibraryPicker = ({
     const hasChildren = children.length > 0;
     const isGenerated = !!resume.parentResumeId;
     const isSelected = selectedResumeId === resume.id;
+    const ruleMatch = ruleMatchesByResumeId.get(resume.id);
+    const ruleMatchTitle = ruleMatch
+      ? [
+          'Rule-based estimate for the current JD. No AI used.',
+          ruleMatch.matchedKeywords.length ? `Matched: ${ruleMatch.matchedKeywords.join(', ')}` : '',
+          ruleMatch.missingKeywords.length ? `Missing: ${ruleMatch.missingKeywords.join(', ')}` : '',
+        ].filter(Boolean).join('\n')
+      : '';
 
     return (
       <div key={resume.id}>
@@ -156,13 +177,12 @@ const ResumeLibraryPicker = ({
             )}
           </div>
 
-          {resume.matchScore ? (
-            <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
-              resume.matchScore >= 80 ? 'bg-emerald-100 text-emerald-700'
-              : resume.matchScore >= 60 ? 'bg-amber-100 text-amber-700'
-              : 'bg-neutral-100 text-neutral-600'
-            }`}>
-              {resume.matchScore}%
+          {ruleMatch ? (
+            <span
+              className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${getRuleMatchToneClass(ruleMatch.score)}`}
+              title={ruleMatchTitle}
+            >
+              {ruleMatch.score}%
             </span>
           ) : null}
         </div>
@@ -216,6 +236,11 @@ const ResumeLibraryPicker = ({
               </button>
             )}
           </div>
+          {jobDescription.trim() && (
+            <div className="mt-2 text-[11px] text-neutral-500">
+              Rule-based estimate from current JD keywords. No AI.
+            </div>
+          )}
         </div>
 
         <div className="h-[460px] overflow-y-auto p-2">

@@ -364,16 +364,6 @@ const FileBrowser = ({
             )}
           </div>
 
-          {resume.matchScore && (
-            <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
-              resume.matchScore >= 80 ? 'bg-emerald-100 text-emerald-700' :
-              resume.matchScore >= 60 ? 'bg-amber-100 text-amber-700' :
-              'bg-neutral-100 text-neutral-600'
-            }`}>
-              {resume.matchScore}%
-            </span>
-          )}
-
           <button
             onClick={(e) => openMenu(e, resume.id, 'resume', groupId)}
             className="menu-trigger p-1 text-neutral-400 hover:text-neutral-600 rounded opacity-0 group-hover:opacity-100 transition-opacity"

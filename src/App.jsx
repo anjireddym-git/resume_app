@@ -32,7 +32,6 @@ import {
   getResumeGroup, 
   getResume, 
   updateResumeCustomData, 
-  updateResumeMatchAnalysis,
   createResume,
   createGeneratedResume,
   buildFullResume,
@@ -247,6 +246,7 @@ function App() {
       setCurrentGroup(null);
       setCurrentResume(null);
       setResumeData({});
+      setMatchAnalysis(null);
       return;
     }
 
@@ -265,13 +265,14 @@ function App() {
         setCurrentGroup(null);
         setCurrentResume(null);
         setResumeData({});
+        setMatchAnalysis(null);
         return;
       }
       
       setCurrentGroup(group);
       setCurrentResume(resume);
       setJobDescription(resume.jobDescription || '');
-      setMatchAnalysis(resume.matchAnalysis || null);
+      setMatchAnalysis(null);
       
       // Load section order and visibility from group (or use defaults)
       setSectionOrder(group.sectionOrder || DEFAULT_SECTION_ORDER);
@@ -393,7 +394,6 @@ function App() {
       const analysis = await geminiService.analyzeMatch(resumeData, jobDesc);
       setMatchAnalysis(analysis);
       setJobDescription(jobDesc);
-      await updateResumeMatchAnalysis(currentResume.id, analysis.matchScore, analysis);
       // Track match analysis
       analyticsService.trackAIMatchAnalysis(analysis.matchScore);
     } catch (err) {
@@ -508,6 +508,11 @@ function App() {
         validator: final?.validator || s.validator,
         elapsedMs: Date.now() - startedAt,
       } : s));
+      if (!validatorOk) {
+        const issues = (final?.validator?.issues || []).slice(0, 3).join('; ');
+        setError(`AI output needs review before saving${issues ? `: ${issues}` : '.'}`);
+        return;
+      }
 
       // Track AI optimization success
       analyticsService.trackAIOptimizeSuccess(previousScore, 0, mode);

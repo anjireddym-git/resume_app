@@ -13,7 +13,6 @@ import {
   buildFullResume,
   createGeneratedResume,
   logSentApplication,
-  updateResumeMatchAnalysis,
   getUserSettings,
   listEmailTemplates,
   getResumeGroups,
@@ -23,6 +22,7 @@ import { exportToDOCX, generateDocxBlob } from '../../services/exportService';
 import { sendGmail, validateEmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
 import { analyticsService } from '../../services/analyticsService';
 import { buildOutreachUserProfile } from '../../services/outreachAiContext';
+import { calculateRuleBasedMatch } from '../../lib/ruleBasedMatch';
 import AgentThinkingPane from '../AgentThinkingPane';
 import GeneratedDocxPreview from '../GeneratedDocxPreview';
 import { buildOutreachDocxRenderOptions, sanitizeOutreachFilename } from './outreachDocxOptions';
@@ -257,6 +257,11 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
         validator: final?.validator || state.validator,
         elapsedMs: Date.now() - startedAt,
       } : state);
+      if (!validatorOk) {
+        const issues = (final?.validator?.issues || []).slice(0, 3).join('; ');
+        setError(`AI output needs review before saving${issues ? `: ${issues}` : '.'}`);
+        return;
+      }
 
       let newId = final?.newResumeId || null;
       if (!newId) {
@@ -279,11 +284,8 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
       setNewResumeId(newId);
       analyticsService.trackAIOptimizeSuccess(0, 0, 'tailor_and_send');
       analyticsService.trackCreditsUsed('tailor_and_send', 1);
-      try {
-        const analysis = await geminiService.analyzeMatch(updated, jobDescription);
-        setMatchAnalysis(analysis);
-        await updateResumeMatchAnalysis(newId, analysis.matchScore, analysis);
-      } catch (e) { console.warn('match analysis failed:', e.message); }
+      const ruleMatch = calculateRuleBasedMatch(jobDescription, updated);
+      setMatchAnalysis(ruleMatch ? { matchScore: ruleMatch.score, source: 'rule' } : null);
       await draftEmail(updated);
     } catch (err) {
       console.error(err);
@@ -527,6 +529,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
                     selectedResumeId={selectedBaseId}
                     onSelectResume={setSelectedBaseId}
                     loading={loadingResumes}
+                    jobDescription={jobDescription}
                   />
                   <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 pt-2">
                     <button
@@ -599,7 +602,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
               {matchAnalysis && (
                 <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-2 text-xs text-emerald-800">
                   <CheckCircle2 className="w-4 h-4" />
-                  Match after tailoring: <strong>{matchAnalysis.matchScore}/100</strong>
+                  Rule match after tailoring: <strong>{matchAnalysis.matchScore}/100</strong>
                 </div>
               )}
               {emailDraft.confidence < 60 && !emailDraft.to && (

@@ -314,9 +314,6 @@ const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
                       <FileText className="w-5 h-5 text-neutral-400" />
                       <div className="flex-1">
                         <span className="text-sm font-medium text-neutral-900">{resume.name}</span>
-                        {resume.matchScore && (
-                          <span className="ml-2 text-xs text-neutral-500">{resume.matchScore}% match</span>
-                        )}
                       </div>
                       <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${
                         selectedSourceId === resume.id
