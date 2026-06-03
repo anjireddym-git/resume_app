@@ -23,6 +23,12 @@ const {
   normalizeOutreachSubject,
   prepareFollowUpEmailPrompt,
 } = require('./outreachPromptHelpers');
+const {
+  collectSkillTextParts,
+  collectSkillValues,
+  normalizeResumeSkillCategories,
+  normalizeSkillCategories,
+} = require('./resumeSkillCategories');
 
 // Initialize Firebase Admin
 admin.initializeApp();
@@ -351,7 +357,10 @@ TRANSFORMATION INSTRUCTIONS:
 5. **SKILLS**:
    - Add relevant skills the candidate likely has but didn't emphasize
    - Reorganize to put target-role skills FIRST
-   - Group by category (Languages, Frameworks, Tools, Cloud, Databases)
+   - Preserve source resume skill category labels when they still fit the target role
+   - Order categories by target-role relevance, then keep remaining source categories in original order
+   - Add a new human category label only when important target-role skills do not fit an existing category
+   - Never collapse skills into fixed generic buckets like languages/frameworks/tools/databases unless the source resume already used those exact labels
    - Include certifications-relevant technologies
 
 6. **PROJECTS**: Reframe each project to:
@@ -375,7 +384,7 @@ Return the complete transformed resume as valid JSON. No markdown, no code fence
 
   let text = await callAIText(aiClient, model, provider, prompt);
   text = text.replace(/\`\`\`json\n?/g, '').replace(/\`\`\`\n?/g, '').trim();
-  return JSON.parse(text);
+  return normalizeResumeSkillCategories(JSON.parse(text));
 }
 
 async function updateResumeForJob(aiClient, model, provider, currentResume, jobDescription, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications']) {
@@ -384,7 +393,7 @@ async function updateResumeForJob(aiClient, model, provider, currentResume, jobD
     summary: 'summary - Completely rewrite to position candidate for this specific role',
     jobTitles: 'experience[].position - Update job titles/roles to better align with target role while staying truthful',
     experience: 'experience[].highlights - Reframe each bullet to emphasize skills/technologies relevant to target job',
-    skills: 'skills object - Reorganize and reframe skills to prioritize what the job needs',
+    skills: 'skills object - Reorganize dynamic skill categories to prioritize what the job needs while preserving human category labels',
     projects: 'projects array - Rewrite descriptions to emphasize technologies and outcomes relevant to target role',
     internships: 'internships array - Reframe internship experiences to highlight transferable skills for target role',
     hackathons: 'hackathons array - Emphasize relevant technologies, problem-solving, and outcomes that align with target job',
@@ -441,7 +450,11 @@ ATS OPTIMIZATION REQUIREMENTS:
 3. EXACT MATCH: Use exact phrases from the JD where possible (e.g., if JD says "React.js", use "React.js" not just "React")
 4. STANDARD TERMINOLOGY: Use industry-standard terms that ATS systems recognize
 5. SKILLS ORGANIZATION: 
-   - Put skills mentioned in JD FIRST in each category
+   - Put skills mentioned in JD FIRST in each relevant category
+   - Preserve existing category labels/order when categories remain relevant
+   - Order JD-critical categories first, then keep remaining original categories in original order
+   - Add new role-specific human labels only when important JD skills do not fit existing categories
+   - Never force generic buckets like languages/frameworks/tools/databases unless the source resume already used those exact labels
    - Format as comma-separated list for maximum parsing
    - Include both acronyms and full names where applicable (e.g., "AWS, Amazon Web Services")
 
@@ -482,7 +495,7 @@ Return ONLY valid JSON. No markdown, no code fences.`;
 
   let text = await callAIText(aiClient, model, provider, prompt);
   text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  return JSON.parse(text);
+  return normalizeResumeSkillCategories(JSON.parse(text));
 }
 
 async function analyzeMatch(aiClient, model, provider, currentResume, jobDescription) {
@@ -769,7 +782,7 @@ Return ONLY valid JSON. No prose, no markdown fences.`;
     summary: '',
     experience: [],
     education: [],
-    skills: { languages: [], frameworks: [], tools: [], databases: [] },
+    skills: {},
     projects: [],
     certifications: [],
     customSections: []
@@ -2193,8 +2206,9 @@ exports.getCredits = onCall(async (request) => {
 /**
  * JSON schema constraining the final answer part. Field set mirrors the
  * client-side resume shape used by createGeneratedResume() in
- * src/services/resumeService.js. Fields are kept optional so the model can
- * omit sections that are not present in the source resume.
+ * src/services/resumeService.js. AI emits skills as ordered category rows so
+ * labels can stay dynamic; we normalize rows back to the stored object shape
+ * before validation, persistence, or returning to the browser.
  */
 const RESUME_RESPONSE_SCHEMA = {
   type: 'object',
@@ -2241,13 +2255,13 @@ const RESUME_RESPONSE_SCHEMA = {
       },
     },
     skills: {
-      type: 'object',
-      properties: {
-        languages:  { type: 'array', items: { type: 'string' } },
-        frameworks: { type: 'array', items: { type: 'string' } },
-        tools:      { type: 'array', items: { type: 'string' } },
-        databases:  { type: 'array', items: { type: 'string' } },
-        other:      { type: 'array', items: { type: 'string' } },
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          label: { type: 'string' },
+          items: { type: 'array', items: { type: 'string' } },
+        },
       },
     },
     projects: {
@@ -2351,13 +2365,10 @@ const RESUME_RESPONSE_SCHEMA_OPENAI = strObj({
     gpa: strStr,
     highlights: strStrArr,
   })),
-  skills: strObj({
-    languages: strStrArr,
-    frameworks: strStrArr,
-    tools: strStrArr,
-    databases: strStrArr,
-    other: strStrArr,
-  }),
+  skills: strArr(strObj({
+    label: strStr,
+    items: strStrArr,
+  })),
   projects: strArr(strObj({
     name: strStr,
     description: strStr,
@@ -2479,6 +2490,14 @@ You may rewrite:
 - experience[].position when a standard JD-aligned title improves fit.
 - summary, skills, project content, and every experience bullet.
 
+Skill category rules:
+- Return skills as an ordered array of categories: { "label": "Category Name", "items": ["Skill"] }.
+- Prefer category labels from the base resume when those categories remain relevant; preserve their spelling, casing, and human wording.
+- Order categories by JD relevance: JD-critical categories first, then remaining original categories in their original relative order.
+- Within each category, put JD-required or JD-preferred skills first, then remaining source skills in natural order.
+- Add a new role-specific category only when important JD skills do not fit an existing source category; use natural labels such as "AI/ML & GenAI", "Cloud Platforms", "Data Engineering", or labels implied by the JD.
+- Omit empty categories and never force generic buckets like languages/frameworks/tools/databases/other unless the source resume already used those exact labels or the role genuinely calls for them.
+
 Writing rules:
 - The most recent experience must contain the strongest match to the JD stack and responsibilities.
 - Include all major JD technologies and important related terms naturally; do not keyword-stuff.
@@ -2592,10 +2611,7 @@ function cleanGeneratedRoleTitle(value) {
 }
 
 function collectGeneratedNameText(generatedResume = {}, jobDescription = '') {
-  const skills = generatedResume.skills || {};
-  const skillText = Array.isArray(skills)
-    ? skills.flatMap((entry) => [entry?.label, ...((entry?.items) || [])]).join(' ')
-    : Object.entries(skills).flatMap(([label, items]) => [label, ...(Array.isArray(items) ? items : [])]).join(' ');
+  const skillText = collectSkillTextParts(generatedResume.skills).join(' ');
 
   return [
     generatedResume.metadata?.targetPersonaTitle,
@@ -2738,8 +2754,7 @@ function flattenResumeText(resume) {
   const push = (v) => { if (v) parts.push(String(v)); };
   push(resume?.personalInfo?.title);
   push(resume?.summary);
-  const skills = resume?.skills || {};
-  Object.values(skills).forEach((arr) => Array.isArray(arr) && arr.forEach(push));
+  collectSkillTextParts(resume?.skills).forEach(push);
   (resume?.experience || []).forEach((e) => {
     push(e?.position); push(e?.company);
     (e?.highlights || []).forEach(push);
@@ -2810,7 +2825,7 @@ function validateAgentOutput(original, generated, validationMode = 'jd_first', j
 
   if (!norm(generated?.personalInfo?.title)) hardIssues.push('missing JD-aligned resume title (personalInfo.title)');
   if (!norm(generated?.summary)) hardIssues.push('missing summary');
-  const skillsValues = Object.values(generated?.skills || {}).flat().filter(Boolean);
+  const skillsValues = collectSkillValues(generated?.skills);
   if (skillsValues.length === 0) hardIssues.push('empty skills section');
   if (origExp.length > 0 && genExp.length === 0) hardIssues.push('empty experience section');
   const densityIssues = validateContractResumeDensity(original, generated);
@@ -2951,6 +2966,7 @@ async function repairGeneratedResume({
     `- Preserve contact identity, company names/order, company locations, dates, education, and existing certifications exactly.\n` +
     `- Do not add degrees or certifications that are not present in the original resume.\n` +
     `- Keep the JD-first role, stack, summary, skills, and bullets strong; do not revert to unrelated base-resume wording.\n` +
+    `- Keep skills as dynamic ordered { label, items } categories: preserve relevant source labels, put JD-critical categories first, and do not force languages/frameworks/tools/databases/other buckets.\n` +
     `- Ensure the most recent experience carries the strongest JD stack coverage.\n` +
     `- Keep the summary as ${CONTRACT_DENSITY.summaryMinPoints}-${CONTRACT_DENSITY.summaryTargetMaxPoints}+ newline-separated professional summary points; preserve a higher original count.\n` +
     `- Use contract bullet depth: first experience 20+ bullets, all other roles 16+, and 50+ combined older-role bullets when the original has 3+ roles.\n` +
@@ -3008,7 +3024,7 @@ async function repairGeneratedResume({
     text = resp.text || '';
   }
 
-  return parseStrictJson(text);
+  return normalizeResumeSkillCategories(parseStrictJson(text));
 }
 
 /**
@@ -3108,7 +3124,7 @@ async function persistGeneratedResumeServerSide({
     customData: {
       summary: generatedResume.summary || '',
       experience: generatedResume.experience || [],
-      skills: generatedResume.skills || {},
+      skills: normalizeSkillCategories(generatedResume.skills),
       projects: generatedResume.projects || [],
       certifications: generatedResume.certifications || [],
       internships: generatedResume.internships || [],
@@ -3243,7 +3259,9 @@ exports.runResumeAgentStreaming = onCall(
       `degrees or certifications that are not in the base resume. The most recent experience ` +
       `must carry the strongest match to the JD stack and should have 20+ bullets. All other ` +
       `roles should have 16+ bullets. When the base has 3+ experience entries, older roles ` +
-      `combined should have 50+ bullets.\n\n` +
+      `combined should have 50+ bullets. For skills, preserve dynamic category labels from ` +
+      `the base resume when relevant, order JD-critical categories first, and return the ` +
+      `schema's ordered { label, items } category array without forcing generic buckets.\n\n` +
       `${buildContractDensityInstructions(resume)}\n\n` +
       `${buildAuthenticityInstructions(resume, jobDescription)}\n\n` +
       `BASE_RESUME:\n${JSON.stringify(resume, null, 2)}\n\n` +
@@ -3455,6 +3473,7 @@ exports.runResumeAgentStreaming = onCall(
       await refund('json_parse_failed');
       throw new HttpsError('internal', 'AI returned malformed JSON');
     }
+    finalResume = normalizeResumeSkillCategories(finalResume);
     if (finishReason && finishReason !== 'STOP') {
       console.warn(`[agent] non-STOP finish_reason: ${finishReason} — resume may be partially truncated`);
       await send({ type: 'status', stage: 'truncated', finishReason });

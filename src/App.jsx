@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { FileText, RefreshCw, LogOut, User, ChevronDown, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X } from 'lucide-react';
+import { FileText, LogOut, User, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X, Sun, Moon, Monitor } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
 import { CreditsProvider, useCredits } from './contexts/CreditsContext';
 import LoginPage from './pages/LoginPage';
@@ -23,6 +23,7 @@ import ApiKeyInput from './components/ApiKeyInput';
 import SplashScreen from './components/SplashScreen';
 import CreditsDisplay from './components/CreditsDisplay';
 import ResizableSplitPane from './components/ResizableSplitPane';
+import { useThemeMode } from './hooks/useThemeMode';
 import { geminiService } from './services/geminiService';
 import { analyticsService } from './services/analyticsService';
 import { DEFAULT_SECTION_ORDER } from './config/templates';
@@ -48,6 +49,11 @@ const SIDEBAR_WIDTH_KEY = 'resumeSidebarWidth';
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const MIN_SIDEBAR_WIDTH = 256;
 const MAX_SIDEBAR_WIDTH = 560;
+const THEME_MODE_OPTIONS = [
+  { value: 'light', label: 'Light', Icon: Sun },
+  { value: 'dark', label: 'Dark', Icon: Moon },
+  { value: 'system', label: 'System', Icon: Monitor },
+];
 
 function getInitialSidebarWidth() {
   if (typeof window === 'undefined') return DEFAULT_SIDEBAR_WIDTH;
@@ -91,6 +97,37 @@ const OutreachTabs = ({ view, setView }) => {
   );
 };
 
+const ThemeModeControl = ({ mode, resolvedTheme, onChange }) => (
+  <div className="flex flex-col gap-1.5">
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-xs font-medium text-neutral-500 uppercase tracking-wide">Theme</span>
+      <span className="text-xs text-neutral-400 capitalize">{resolvedTheme}</span>
+    </div>
+    <div className="inline-flex w-full sm:w-auto rounded-lg border border-neutral-200 bg-neutral-50 p-1">
+      {THEME_MODE_OPTIONS.map(({ value, label, Icon }) => {
+        const active = mode === value;
+        return (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onChange(value)}
+            aria-pressed={active}
+            title={label}
+            className={`h-8 px-3 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors ${
+              active
+                ? 'bg-white text-neutral-900 shadow-sm'
+                : 'text-neutral-500 hover:bg-white/70 hover:text-neutral-800'
+            }`}
+          >
+            <Icon className="w-3.5 h-3.5" />
+            <span>{label}</span>
+          </button>
+        );
+      })}
+    </div>
+  </div>
+);
+
 function App() {
   const {
     user,
@@ -107,6 +144,7 @@ function App() {
     driveSyncEnabled,
   } = useAuth();
   const { credits, hasCredits, purchaseCredits } = useCredits();
+  const { themeMode, resolvedTheme, setThemeMode } = useThemeMode(user?.preferences?.themeMode);
   
   const [showSplash, setShowSplash] = useState(true);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
@@ -749,6 +787,15 @@ function App() {
     }
   };
 
+  const handleResetChanges = () => {
+    if (!currentGroup || !currentResume) return;
+    const fullResume = buildFullResume(currentGroup, currentResume);
+    setResumeData(fullResume);
+    resetEditor(fullResume);
+    setMatchAnalysis(null);
+    setHasUnsavedChanges(false);
+  };
+
   // Handle navigation with unsaved changes warning
   const handleResumeSelect = (groupId, resumeId) => {
     if (hasUnsavedChanges) {
@@ -993,6 +1040,16 @@ function App() {
     }
   };
 
+  const handleThemeModeChange = async (nextMode) => {
+    setThemeMode(nextMode);
+    if (!user) return;
+    try {
+      await updatePreferences({ themeMode: nextMode });
+    } catch (err) {
+      console.error('Failed to save theme mode:', err);
+    }
+  };
+
 
 
   if (authLoading) {
@@ -1028,20 +1085,13 @@ function App() {
         <div className="flex items-center gap-3">
           {/* Credits Display */}
           <CreditsDisplay />
-          
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="hidden sm:flex h-8 px-3 rounded-md text-sm text-neutral-600 hover:bg-neutral-100 items-center gap-1"
-          >
-            Settings
-            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSettings ? 'rotate-180' : ''}`} />
-          </button>
 
           {/* User Menu */}
           <div className="relative">
             <button
               onClick={() => setShowUserMenu(!showUserMenu)}
               className="h-8 w-8 rounded-full overflow-hidden border-2 border-neutral-200 hover:border-neutral-300"
+              title="Account menu"
             >
               {user?.photoURL ? (
                 <img src={user.photoURL} alt={user.displayName} className="w-full h-full object-cover" />
@@ -1051,11 +1101,21 @@ function App() {
             </button>
 
             {showUserMenu && (
-              <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-neutral-200 rounded-lg shadow-lg z-20 py-1">
+              <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-neutral-200 rounded-lg shadow-lg z-20 py-1">
                 <div className="px-3 py-2 border-b border-neutral-100">
                   <p className="text-sm font-medium text-neutral-900">{user?.displayName}</p>
                   <p className="text-xs text-neutral-500">{user?.email}</p>
                 </div>
+                <button
+                  onClick={() => {
+                    setShowSettings((value) => !value);
+                    setShowUserMenu(false);
+                  }}
+                  className="w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-50 flex items-center gap-2"
+                >
+                  <Settings2 className="w-4 h-4" />
+                  Settings
+                </button>
                 <button
                   onClick={() => { signOut(); setShowUserMenu(false); }}
                   className="w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-50 flex items-center gap-2"
@@ -1071,7 +1131,12 @@ function App() {
 
       {/* Settings Panel */}
       {showSettings && (
-        <div className="bg-white border-b border-neutral-200 px-4 py-3">
+        <div className="bg-white border-b border-neutral-200 px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <ThemeModeControl
+            mode={themeMode}
+            resolvedTheme={resolvedTheme}
+            onChange={handleThemeModeChange}
+          />
           <ApiKeyInput 
             onApiKeySet={handleApiKeySet} 
             isSet={apiKeySet}
@@ -1184,10 +1249,30 @@ function App() {
             <>
               {/* Left Panel - Web Editor + Controls */}
               <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
-                {/* Toolbar */}
-                <div className="min-h-14 border-b border-neutral-200 bg-white px-3 md:px-4 py-2 flex flex-wrap items-center justify-between gap-2 flex-shrink-0">
-                  <div className="flex items-center gap-2 md:gap-3 flex-wrap">
-                    {/* Optimize Button */}
+                {/* Selected Resume Command Bar */}
+                <div className="min-h-16 border-b border-neutral-200 bg-white px-3 md:px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
+                  <div className="min-w-0 flex items-center gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-neutral-900 truncate">
+                        {currentResume.name || resumeData?.personalInfo?.name || 'Selected resume'}
+                      </div>
+                      <div className="text-xs text-neutral-500 truncate">
+                        {currentGroup?.name || 'Resume workspace'}
+                      </div>
+                    </div>
+
+                    {matchAnalysis && (
+                      <div className={`px-2.5 py-1 rounded-lg text-xs font-medium flex-shrink-0 ${
+                        matchAnalysis.matchScore >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                        matchAnalysis.matchScore >= 60 ? 'bg-amber-100 text-amber-700' :
+                        'bg-neutral-100 text-neutral-600'
+                      }`}>
+                        {matchAnalysis.matchScore}%<span className="hidden sm:inline"> Match</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 md:gap-2.5 flex-wrap">
                     <button
                       onClick={() => setShowJobModal(true)}
                       disabled={!apiKeySet || isLoading || !hasCredits}
@@ -1198,16 +1283,15 @@ function App() {
                       <span className="hidden sm:inline">Optimize</span>
                     </button>
 
-                    {/* History Button */}
                     <button
                       onClick={() => setShowVersionHistory(true)}
                       className="h-9 px-3 border border-neutral-200 text-neutral-600 rounded-lg text-sm font-medium hover:bg-neutral-50 flex items-center gap-2"
                       title="Version History"
                     >
                       <History className="w-4 h-4" />
+                      <span className="hidden lg:inline">Version History</span>
                     </button>
 
-                    {/* Layout Button - hidden on mobile */}
                     <button
                       onClick={() => setShowLayoutPanel(!showLayoutPanel)}
                       className={`hidden md:flex h-9 px-3 border rounded-lg text-sm font-medium items-center gap-2 ${
@@ -1215,29 +1299,18 @@ function App() {
                           ? 'border-neutral-900 bg-neutral-900 text-white' 
                           : 'border-neutral-200 text-neutral-700 hover:bg-neutral-50'
                       }`}
+                      title="Layout"
                     >
                       <Layers className="w-4 h-4" />
+                      <span className="hidden xl:inline">Layout</span>
                     </button>
-                    
-                    {/* Match Score Badge */}
-                    {matchAnalysis && (
-                      <div className={`px-2 md:px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium ${
-                        matchAnalysis.matchScore >= 80 ? 'bg-emerald-100 text-emerald-700' :
-                        matchAnalysis.matchScore >= 60 ? 'bg-amber-100 text-amber-700' :
-                        'bg-neutral-100 text-neutral-600'
-                      }`}>
-                        {matchAnalysis.matchScore}%<span className="hidden sm:inline"> Match</span>
-                      </div>
-                    )}
-                  </div>
 
-                  <div className="flex items-center gap-2 md:gap-3 flex-wrap">
-                    {/* Save Button - shows when there are unsaved changes */}
                     {hasUnsavedChanges && (
                       <button
                         onClick={handleSave}
                         disabled={isSaving}
-                        className="h-9 px-3 md:px-4 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2 transition-all animate-pulse"
+                        className="h-9 px-3 md:px-4 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2 transition-all"
+                        title="Save changes"
                       >
                         {isSaving ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -1248,14 +1321,13 @@ function App() {
                       </button>
                     )}
 
-                    {/* Template Selector removed — PDF support removed */}
-
                     <ActionButtons
                       resumeRef={resumeRef}
                       resumeData={resumeData}
                       renderOptions={currentRenderOptions}
                       hasChanges={hasUnsavedChanges}
                       currentResume={currentResume}
+                      onReset={handleResetChanges}
                     />
                   </div>
                 </div>

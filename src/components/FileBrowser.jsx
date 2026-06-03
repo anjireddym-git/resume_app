@@ -393,10 +393,11 @@ const FileBrowser = ({
           <span className="text-xs font-medium text-neutral-500 uppercase tracking-wide">Resumes</span>
           <button 
             onClick={onCreateGroup}
-            className="p-1.5 text-neutral-500 hover:bg-neutral-100 rounded-md transition-colors"
+            className="h-7 px-2 text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 rounded-md transition-colors inline-flex items-center gap-1"
             title="New Group"
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="w-3.5 h-3.5" />
+            New
           </button>
         </div>
         

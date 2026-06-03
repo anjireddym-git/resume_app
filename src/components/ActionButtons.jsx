@@ -69,7 +69,7 @@ const ActionButtons = ({
         ) : (
           <FileText className="w-4 h-4" />
         )}
-        <span className="hidden sm:inline">{isExportingDOCX ? 'Exporting...' : 'DOCX'}</span>
+        <span className="hidden sm:inline">{isExportingDOCX ? 'Exporting...' : 'Export DOCX'}</span>
       </button>
 
       {hasChanges && (

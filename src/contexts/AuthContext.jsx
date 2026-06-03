@@ -128,7 +128,12 @@ export const AuthProvider = ({ children }) => {
 
         const userRef = doc(db, 'users', firebaseUser.uid);
         const userSnap = await getDoc(userRef);
-        const initialPreferences = { currentGroupId: null, currentResumeId: null, driveSyncEnabled: false };
+        const initialPreferences = {
+          currentGroupId: null,
+          currentResumeId: null,
+          driveSyncEnabled: false,
+          themeMode: 'system',
+        };
         const userData = {
           uid: firebaseUser.uid,
           email: firebaseUser.email,

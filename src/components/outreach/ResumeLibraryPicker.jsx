@@ -113,6 +113,7 @@ const ResumeLibraryPicker = ({
     const ruleMatchTitle = ruleMatch
       ? [
           'Rule-based estimate for the current JD. No AI used.',
+          ruleMatch.rules.length ? `Rules: ${ruleMatch.rules.join('; ')}` : '',
           ruleMatch.matchedKeywords.length ? `Matched: ${ruleMatch.matchedKeywords.join(', ')}` : '',
           ruleMatch.missingKeywords.length ? `Missing: ${ruleMatch.missingKeywords.join(', ')}` : '',
         ].filter(Boolean).join('\n')
