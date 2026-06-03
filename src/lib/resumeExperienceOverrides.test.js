@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCustomExperienceForSave } from './resumeExperienceOverrides';
+import { buildCustomExperienceForSave, buildResumeCustomDataForSave } from './resumeExperienceOverrides';
 
 describe('buildCustomExperienceForSave', () => {
   it('keeps shared timeline fields out of resume custom data when unchanged', () => {
@@ -77,5 +77,40 @@ describe('buildCustomExperienceForSave', () => {
         endDate: 'Present',
       },
     ]);
+  });
+
+  it('builds complete custom data without dropping custom sections', () => {
+    const customData = buildResumeCustomDataForSave({
+      personalInfo: { name: 'Anji Reddy' },
+      summary: 'Senior engineer',
+      experience: [
+        {
+          position: 'Senior AI/ML Engineer',
+          company: 'Humana',
+          highlights: ['Built ML services.'],
+        },
+      ],
+      education: [],
+      skills: { Languages: ['Python'] },
+      projects: [],
+      certifications: [],
+      internships: [],
+      hackathons: [],
+      customSections: { awards: 'Innovation award' },
+    }, {
+      sharedData: {
+        experience: [{ position: 'Lead AI/ML Engineer', company: 'Humana' }],
+      },
+    });
+
+    expect(customData).toMatchObject({
+      personalInfo: { name: 'Anji Reddy' },
+      summary: 'Senior engineer',
+      education: [],
+      educationOverride: true,
+      skills: { Languages: ['Python'] },
+      customSections: { awards: 'Innovation award' },
+    });
+    expect(customData.experience[0].position).toBe('Senior AI/ML Engineer');
   });
 });

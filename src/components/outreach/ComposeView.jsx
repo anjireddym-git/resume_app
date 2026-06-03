@@ -22,6 +22,7 @@ import { geminiService } from '../../services/geminiService';
 import { exportToDOCX, generateDocxBlob } from '../../services/exportService';
 import { sendGmail, validateEmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
 import { analyticsService } from '../../services/analyticsService';
+import { buildOutreachUserProfile } from '../../services/outreachAiContext';
 import AgentThinkingPane from '../AgentThinkingPane';
 import GeneratedDocxPreview from '../GeneratedDocxPreview';
 import { buildOutreachDocxRenderOptions, sanitizeOutreachFilename } from './outreachDocxOptions';
@@ -305,7 +306,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
       const draft = await geminiService.generateRecruiterEmail(
         jobDescription,
         resumeForDraft || tailoredResume,
-        { name: user.displayName || user.email, email: user.email, tone: settings?.aiTone },
+        buildOutreachUserProfile(user, settings),
       );
       setEmailDraft({
         to: draft.recipientEmail || '',
@@ -819,6 +820,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
                 <div className="flex justify-between gap-2"><dt>Default CC</dt><dd className="text-neutral-900 truncate max-w-[140px]">{settings.defaultCc.join(', ') || '—'}</dd></div>
                 <div className="flex justify-between gap-2"><dt>Default BCC</dt><dd className="text-neutral-900 truncate max-w-[140px]">{settings.defaultBcc.join(', ') || '—'}</dd></div>
                 <div className="flex justify-between gap-2"><dt>Signature</dt><dd className="text-neutral-900">{settings.signature ? 'On' : 'Off'}</dd></div>
+                <div className="flex justify-between gap-2"><dt>VISA Type</dt><dd className="text-neutral-900 truncate max-w-[140px]">{settings.visaType || '—'}</dd></div>
                 <div className="flex justify-between gap-2"><dt>AI tone</dt><dd className="text-neutral-900 capitalize">{settings.aiTone}</dd></div>
                 <div className="flex justify-between gap-2"><dt>Follow-ups</dt><dd className="text-neutral-900">{settings.defaultFollowUp.enabled ? `Every ${settings.defaultFollowUp.intervalDays}d × ${settings.defaultFollowUp.maxFollowUps}` : 'Off'}</dd></div>
               </dl>

@@ -9,9 +9,11 @@ import {
   snoozeFollowUp,
   setFollowUpEnabled,
   recordFollowUpSent,
+  getUserSettings,
 } from '../services/resumeService';
 import { geminiService } from '../services/geminiService';
 import { sendGmail, getMessageIdHeader, GmailAuthError } from '../services/gmailService';
+import { buildOutreachUserContext } from '../services/outreachAiContext';
 
 /**
  * FollowUpDashboard: shows follow-up reminders created by the scanDueFollowUps
@@ -24,6 +26,7 @@ const FollowUpDashboard = ({ isOpen, onClose }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState(null);
+  const [settings, setSettings] = useState(null);
 
   // Per-item draft / preview state.
   const [drafts, setDrafts] = useState({}); // { [notificationId]: { subject, body } }
@@ -33,9 +36,13 @@ const FollowUpDashboard = ({ isOpen, onClose }) => {
     setLoading(true);
     setError('');
     try {
-      const ns = await getUnseenNotifications(user.uid, 100);
+      const [ns, nextSettings] = await Promise.all([
+        getUnseenNotifications(user.uid, 100),
+        getUserSettings(user.uid).catch(() => null),
+      ]);
       const followUps = ns.filter((n) => n.type === 'follow-up-due');
       setItems(followUps);
+      setSettings(nextSettings);
     } catch (err) {
       console.error(err);
       setError(err.message || 'Failed to load follow-ups.');
@@ -56,6 +63,7 @@ const FollowUpDashboard = ({ isOpen, onClose }) => {
         context,
         app.jobDescription || '',
         null,
+        buildOutreachUserContext(settings),
       );
       setDrafts((d) => ({ ...d, [notif.id]: {
         subject: draft.subject,

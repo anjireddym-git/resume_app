@@ -1,10 +1,11 @@
 import React from 'react';
-import { AlertTriangle, X } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { AlertTriangle } from 'lucide-react';
 
 const ConfirmDialog = ({ isOpen, title, message, onConfirm, onCancel, confirmText = 'Delete', danger = true }) => {
   if (!isOpen) return null;
 
-  return (
+  const dialog = (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100] p-4">
       <div className="bg-white rounded-xl w-full max-w-sm overflow-hidden shadow-xl">
         <div className="p-4">
@@ -40,6 +41,10 @@ const ConfirmDialog = ({ isOpen, title, message, onConfirm, onCancel, confirmTex
       </div>
     </div>
   );
+
+  if (typeof document === 'undefined') return dialog;
+
+  return createPortal(dialog, document.body);
 };
 
 export default ConfirmDialog;

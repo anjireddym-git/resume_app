@@ -216,11 +216,11 @@ class AIService {
   }
 
   /** Draft the next email using the latest chronological Gmail thread context. */
-  async draftFollowUpEmail({ originalEmail, threadMessages = [], timingContext = {} }, jobDescription, tailoredResume = null) {
+  async draftFollowUpEmail({ originalEmail, threadMessages = [], timingContext = {} } = {}, jobDescription, tailoredResume = null, userContext = {}) {
     try {
       const result = await this.callAI({
         action: 'draftFollowUpEmail',
-        data: { originalEmail, jobDescription, tailoredResume, threadMessages, timingContext },
+        data: { originalEmail, jobDescription, tailoredResume, threadMessages, timingContext, userContext },
       });
       if (!result.data?.success) throw new Error(result.data?.error || 'AI processing failed');
       return result.data.data;

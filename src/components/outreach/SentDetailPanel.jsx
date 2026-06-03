@@ -19,6 +19,7 @@ import {
 } from '../../services/resumeService';
 import { geminiService } from '../../services/geminiService';
 import { sendGmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
+import { buildOutreachUserContext } from '../../services/outreachAiContext';
 
 const fetchGmailHistoryFn = httpsCallable(functions, 'fetchGmailHistory');
 
@@ -111,6 +112,7 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
         context,
         application.jobDescription || '',
         null,
+        buildOutreachUserContext(settings),
       );
       let body = d.body || '';
       if (settings?.signature && !body.includes(settings.signature)) {

@@ -103,25 +103,29 @@ const MinimalRow = ({ children, onRemove, onMoveUp, onMoveDown, isFirst, isLast 
 );
 
 // Expandable row for items with more details
-const ExpandableRow = ({ title, subtitle, isExpanded, onToggle, children, onRemove, onMoveUp, onMoveDown, isFirst, isLast }) => (
+const ExpandableRow = ({ title, subtitle, isExpanded, onToggle, children, onRemove, onMoveUp, onMoveDown, isFirst, isLast, showReorder = true, showRemove = true }) => (
   <div className="group border-b border-neutral-100 last:border-0">
     <div className="flex items-center gap-2 py-1.5">
-      <div className="flex flex-col gap-0 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button onClick={onMoveUp} disabled={isFirst} className="p-0.5 text-neutral-300 hover:text-neutral-500 disabled:opacity-20">
-          <ChevronUp className="w-3 h-3" />
-        </button>
-        <button onClick={onMoveDown} disabled={isLast} className="p-0.5 text-neutral-300 hover:text-neutral-500 disabled:opacity-20">
-          <ChevronDown className="w-3 h-3" />
-        </button>
-      </div>
+      {showReorder && (
+        <div className="flex flex-col gap-0 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button onClick={onMoveUp} disabled={isFirst} className="p-0.5 text-neutral-300 hover:text-neutral-500 disabled:opacity-20">
+            <ChevronUp className="w-3 h-3" />
+          </button>
+          <button onClick={onMoveDown} disabled={isLast} className="p-0.5 text-neutral-300 hover:text-neutral-500 disabled:opacity-20">
+            <ChevronDown className="w-3 h-3" />
+          </button>
+        </div>
+      )}
       <button onClick={onToggle} className="flex-1 flex items-center gap-2 text-left min-w-0">
         {isExpanded ? <ChevronDown className="w-3 h-3 text-neutral-400 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 text-neutral-400 flex-shrink-0" />}
         <span className="text-xs font-medium text-neutral-700 truncate">{title || 'Untitled'}</span>
         {subtitle && <span className="text-xs text-neutral-400 truncate hidden sm:inline">· {subtitle}</span>}
       </button>
-      <button onClick={onRemove} className="p-1 text-neutral-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
-        <Trash2 className="w-3 h-3" />
-      </button>
+      {showRemove && (
+        <button onClick={onRemove} className="p-1 text-neutral-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+          <Trash2 className="w-3 h-3" />
+        </button>
+      )}
     </div>
     {isExpanded && (
       <div className="pl-8 pr-2 pb-2 space-y-2">
@@ -580,7 +584,7 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
       <Section title="Experience" count={data.experience?.length || 0}>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 italic">Shared timeline; title edits save to this resume</span>
+            <span className="text-xs text-neutral-400 italic">Shared timeline; title/highlights save to this resume</span>
             <FormatSelector
               sectionId="experience"
               currentFormat={getFormat('experience')}
@@ -601,6 +605,8 @@ const ResumeEditor = ({ resumeData, onUpdate, onFormatChange }) => {
                   onMoveDown={() => moveItem('experience', idx, idx + 1)}
                   isFirst={idx === 0}
                   isLast={idx === arr.length - 1}
+                  showReorder={false}
+                  showRemove={false}
               >
                 <div className="space-y-1.5">
                   <CompactInput label="Position" value={exp.position} onChange={(v) => updateArrayItem('experience', idx, 'position', v)} placeholder="Software Engineer" enableAI={true} fieldType="experience_position" />

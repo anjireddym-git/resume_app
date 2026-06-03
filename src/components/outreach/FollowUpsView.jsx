@@ -14,6 +14,7 @@ import {
 } from '../../services/resumeService';
 import { geminiService } from '../../services/geminiService';
 import { sendGmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
+import { buildOutreachUserContext } from '../../services/outreachAiContext';
 
 const FollowUpsView = ({ user, onOpenApplication }) => {
   const { ensureGmailAccess } = useAuth();
@@ -81,6 +82,7 @@ const FollowUpsView = ({ user, onOpenApplication }) => {
         context,
         app.jobDescription || '',
         null,
+        buildOutreachUserContext(settings),
       );
       let body = draft.body || '';
       if (settings?.signature && !body.includes(settings.signature)) {

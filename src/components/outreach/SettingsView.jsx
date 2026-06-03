@@ -356,6 +356,26 @@ const SettingsView = ({ user }) => {
       </Section>
 
       <Section
+        icon={Shield}
+        title="Candidate context"
+        description="Optional details for AI drafts."
+      >
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-xs font-medium text-neutral-600">VISA Type</label>
+            <SavedPill visible={savedKey === 'visaType'} />
+          </div>
+          <input
+            type="text"
+            value={settings.visaType || ''}
+            onChange={(e) => persist('visaType', e.target.value)}
+            placeholder="H-1B, F-1 OPT, GC EAD, Green Card, US Citizen"
+            className="w-full h-9 px-3 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:border-neutral-400"
+          />
+        </div>
+      </Section>
+
+      <Section
         icon={SettingsIcon}
         title="AI tone"
         description="Used when generating the recruiter email body."

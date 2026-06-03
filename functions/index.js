@@ -18,6 +18,11 @@ const {
   buildAuthenticityInstructions,
   validateResumeAuthenticity,
 } = require('./resumeAuthenticity');
+const {
+  buildRecruiterEmailPrompt,
+  normalizeOutreachSubject,
+  prepareFollowUpEmailPrompt,
+} = require('./outreachPromptHelpers');
 
 // Initialize Firebase Admin
 admin.initializeApp();
@@ -1457,96 +1462,8 @@ function parseStrictJson(text) {
  * Generate a recruiter outreach email from a tailored resume + JD.
  * Returns { recipientEmail, recipientName, subject, body, confidence }.
  */
-function normalizeOutreachSubject(subject = '') {
-  return String(subject || '')
-    .replace(/[–—−]/g, '-')
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/[^\S\r\n]+/g, ' ')
-    .replace(/[\r\n]+/g, ' ')
-    .trim()
-    .slice(0, 160);
-}
-
-function extractWorkAuthorizationSignal(tailoredResume = {}, userProfile = {}) {
-  const explicit = userProfile?.workAuthorization || userProfile?.visaStatus || userProfile?.visaType;
-  if (explicit) return String(explicit).trim();
-
-  const skills = tailoredResume?.skills || {};
-  const skillText = Array.isArray(skills)
-    ? skills.flatMap((entry) => [entry?.label, ...(entry?.items || [])]).join(' ')
-    : Object.entries(skills).flatMap(([label, items]) => [label, ...(Array.isArray(items) ? items : [])]).join(' ');
-  const resumeText = [
-    tailoredResume?.summary,
-    tailoredResume?.personalInfo?.title,
-    skillText,
-    ...(tailoredResume?.experience || []).flatMap((exp) => [
-      exp?.position,
-      exp?.company,
-      ...(exp?.highlights || []),
-    ]),
-  ].filter(Boolean).join(' ');
-
-  const patterns = [
-    { re: /\bH[-\s]?1B\b/i, label: 'H-1B' },
-    { re: /\bH[-\s]?4\s*EAD\b/i, label: 'H-4 EAD' },
-    { re: /\bGC\s*EAD\b/i, label: 'GC EAD' },
-    { re: /\bOPT\b/i, label: 'OPT' },
-    { re: /\bCPT\b/i, label: 'CPT' },
-    { re: /\bGreen Card\b/i, label: 'Green Card' },
-    { re: /\bUS Citizen\b/i, label: 'US Citizen' },
-  ];
-  return patterns.find((item) => item.re.test(resumeText))?.label || '';
-}
-
 async function generateRecruiterEmail(aiClient, model, provider, jobDescription, tailoredResume, userProfile) {
-  const name = userProfile?.name || 'Candidate';
-  const email = userProfile?.email || '';
-  const workAuthorization = extractWorkAuthorizationSignal(tailoredResume, userProfile);
-
-  const prompt = `You are an expert career coach helping a candidate write a concise, professional outreach email to a recruiter for a specific job posting.
-
-CANDIDATE:
-Name: ${name}
-Email: ${email}
-Work authorization / visa signal if known: ${workAuthorization || 'Not provided'}
-
-TAILORED RESUME (compact):
-${JSON.stringify({
-    headline: tailoredResume?.personalInfo?.title || '',
-    summary: tailoredResume?.summary || '',
-    topSkills: Object.values(tailoredResume?.skills || {}).flat().slice(0, 15),
-    topExperience: (tailoredResume?.experience || []).slice(0, 3).map((e) => ({
-      position: e.position || '',
-      company: e.company || '',
-      highlights: (e.highlights || []).slice(0, 3),
-    })),
-  }, null, 2)}
-
-JOB DESCRIPTION:
-${jobDescription}
-
-TASKS:
-1. Extract the most likely recruiter / hiring manager email address from the JD. Look for "apply to", "send resume to", "contact:", an explicit @ in body, etc. If multiple candidates exist, pick the most specific. If NONE is present, return null.
-2. Extract recruiter / hiring manager name if mentioned, else null.
-3. Write a polished recruiter outreach email:
-   - Subject: ASCII only. Use a normal hyphen "-", never an en dash, em dash, smart quote, emoji, bullet, or decorative symbol. Keep it under 90 characters and include the role title plus 2-3 relevant strengths.
-   - Body: exactly 2-3 short sentences, 70-115 words total, one paragraph, plain text only.
-   - Sentence 1 should greet the recruiter by first name if known and introduce the candidate, target role, seniority, and core fit.
-   - Sentence 2 should give one concrete, resume-backed reason the candidate matches the JD, using specific technologies/domain terms without sounding keyword-stuffed.
-   - Sentence 3 should mention the attached resume and invite next steps. If work authorization / visa is known, include it neutrally in this sentence, e.g. "I am currently on H-1B work authorization." Do not overemphasize visa status.
-   - Do not use awkward phrases like "Please reach out to me", "discuss Further", "I hope this email finds you well", or "perfect fit".
-   - No bullet points, no lists, no signature block.
-4. Confidence is your 0-100 estimate that the extracted recipient address actually belongs to a recruiter for THIS role.
-
-Return STRICT JSON only:
-{
-  "recipientEmail": "<email or null>",
-  "recipientName": "<string or null>",
-  "subject": "<subject line>",
-  "body": "<plain-text email body, use \\n for line breaks>",
-  "confidence": <integer 0-100>
-}`;
+  const prompt = buildRecruiterEmailPrompt({ jobDescription, tailoredResume, userProfile });
 
   let text = await callAIText(aiClient, model, provider, prompt);
   text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -1568,74 +1485,12 @@ Return STRICT JSON only:
  * Draft a brief follow-up email keeping the thread context.
  */
 async function draftFollowUpEmail(aiClient, model, provider, data = {}) {
-  const {
-    originalEmail = {},
-    jobDescription = '',
-    threadMessages = [],
-    timingContext = {},
-  } = data;
-  const fallbackDays = Math.max(1, parseInt(data.daysSince || 7, 10));
-  const messages = Array.isArray(threadMessages) && threadMessages.length > 0
-    ? threadMessages
-    : [{
-        direction: 'outgoing',
-        kind: 'initial-outreach',
-        subject: originalEmail.subject || '',
-        body: originalEmail.body || '',
-      }];
-  const recentMessages = messages.slice(-12).map((message) => ({
-    direction: message.direction || 'unknown',
-    kind: message.kind || 'email',
-    from: String(message.from || '').slice(0, 180),
-    to: String(message.to || '').slice(0, 180),
-    sentAt: message.sentAt || null,
-    subject: String(message.subject || '').slice(0, 300),
-    body: String(message.body || '').slice(0, 3000),
-  }));
-  const latest = recentMessages[recentMessages.length - 1] || {};
-  const timing = {
-    generatedAt: timingContext.generatedAt || new Date().toISOString(),
-    followUpNumber: timingContext.followUpNumber || 1,
-    latestMessageDirection: timingContext.latestMessageDirection || latest.direction || 'outgoing',
-    latestMessageAt: timingContext.latestMessageAt || latest.sentAt || null,
-    elapsedSinceLatestMessage: timingContext.elapsedSinceLatestMessage || `${fallbackDays} days`,
-    lastOutgoingAt: timingContext.lastOutgoingAt || null,
-    elapsedSinceLastOutgoing: timingContext.elapsedSinceLastOutgoing || `${fallbackDays} days`,
-    lastIncomingAt: timingContext.lastIncomingAt || null,
-  };
-
-  const prompt = `Draft the next concise email in an existing recruiter outreach thread.
-
-THREAD TIMING FACTS:
-${JSON.stringify(timing, null, 2)}
-
-THREAD MESSAGES IN CHRONOLOGICAL ORDER:
-${JSON.stringify(recentMessages, null, 2)}
-
-JOB DESCRIPTION SUMMARY (secondary context only):
-${jobDescription.slice(0, 800)}
-
-GUIDELINES:
-- Read the latest messages first. Write the natural next message for this actual thread.
-- If the latest message is incoming, respond to or acknowledge the recruiter's latest note. Do NOT claim that they never replied.
-- If the latest message is outgoing and unanswered, write a gentle follow-up without repeating earlier follow-up wording.
-- Use timing language only when it is accurate. Never say "last week", "a few days ago", or similar unless THREAD TIMING FACTS support it. Usually omit elapsed-time wording when only minutes or hours have passed.
-- Write exactly ONE short paragraph (50-70 words). Be calm, specific, and human. No pressure, no apology, no buzzword list, no bullet points.
-- Do NOT add a signature or sign-off — the app appends it automatically.
-- Return only the new email text. Do not quote previous messages.
-- Plain text only.
-- Keep the existing Gmail thread subject, normally "Re: ${originalEmail.subject || latest.subject || ''}".
-
-Return STRICT JSON:
-{
-  "subject": "<usually 'Re: ' + original subject>",
-  "body": "<plain-text body>"
-}`;
+  const { prompt, subjectFallback } = prepareFollowUpEmailPrompt(data);
   let text = await callAIText(aiClient, model, provider, prompt);
   text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   const parsed = parseStrictJson(text);
   if (!parsed) throw new Error('Could not parse follow-up email JSON');
-  if (!parsed.subject) parsed.subject = `Re: ${originalEmail.subject || latest.subject || ''}`;
+  if (!parsed.subject) parsed.subject = subjectFallback;
   return parsed;
 }
 

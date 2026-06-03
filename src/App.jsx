@@ -27,7 +27,7 @@ import { geminiService } from './services/geminiService';
 import { analyticsService } from './services/analyticsService';
 import { DEFAULT_SECTION_ORDER } from './config/templates';
 import { normalizeSummaryToPoints } from './lib/summaryUtils';
-import { buildCustomExperienceForSave } from './lib/resumeExperienceOverrides';
+import { buildResumeCustomDataForSave } from './lib/resumeExperienceOverrides';
 import { 
   getResumeGroup, 
   getResume, 
@@ -724,20 +724,7 @@ function App() {
     setIsSaving(true);
     try {
       // Sanitize data - Firebase doesn't accept undefined values
-      const sanitizedData = {
-        personalInfo: dataToSave.personalInfo || {},
-        summary: dataToSave.summary || '',
-        experience: buildCustomExperienceForSave(
-          dataToSave.experience || [],
-          currentGroup?.sharedData?.experience || []
-        ),
-        education: dataToSave.education || [],
-        skills: dataToSave.skills || {},
-        projects: dataToSave.projects || [],
-        certifications: dataToSave.certifications || [],
-        internships: dataToSave.internships || [],
-        hackathons: dataToSave.hackathons || [],
-      };
+      const sanitizedData = buildResumeCustomDataForSave(dataToSave, currentGroup);
       
       await updateResumeCustomData(currentResume.id, sanitizedData);
       setHasUnsavedChanges(false);

@@ -22,3 +22,24 @@ export function buildCustomExperienceForSave(experience = [], sharedExperience =
     return customExp;
   });
 }
+
+const ensureArray = (value) => Array.isArray(value) ? value : [];
+
+export function buildResumeCustomDataForSave(resumeData = {}, group = {}) {
+  return {
+    personalInfo: resumeData.personalInfo || {},
+    summary: resumeData.summary || '',
+    experience: buildCustomExperienceForSave(
+      resumeData.experience || [],
+      group?.sharedData?.experience || []
+    ),
+    education: ensureArray(resumeData.education),
+    educationOverride: true,
+    skills: resumeData.skills || {},
+    projects: ensureArray(resumeData.projects),
+    certifications: ensureArray(resumeData.certifications),
+    internships: ensureArray(resumeData.internships),
+    hackathons: ensureArray(resumeData.hackathons),
+    customSections: resumeData.customSections || {},
+  };
+}

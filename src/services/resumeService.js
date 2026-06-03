@@ -710,12 +710,14 @@ export const buildFullResume = (group, resume) => {
   
   // Default section formats
   const normalizedSummary = normalizeSummaryToPoints(custom.summary || '');
+  const hasEducationOverride = custom.educationOverride === true
+    || (Array.isArray(custom.education) && custom.education.length > 0);
   
   return {
     personalInfo: mergedPersonalInfo,
     summary: normalizedSummary,
     experience: mergedExperience,
-    education: custom.education?.length ? custom.education : (shared.education || []),
+    education: hasEducationOverride ? (custom.education || []) : (shared.education || []),
     skills: custom.skills || {},
     projects: custom.projects || [],
     certifications: custom.certifications || [],
@@ -1124,6 +1126,7 @@ export const DEFAULT_OUTREACH_SETTINGS = {
   defaultCc: [],
   defaultBcc: [],
   signature: '',
+  visaType: '',
   aiTone: 'professional', // 'professional' | 'casual' | 'enthusiastic'
   notifyOnReply: true,
   notifyOnFollowUpDue: true,
