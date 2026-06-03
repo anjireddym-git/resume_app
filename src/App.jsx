@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { FileText, LogOut, User, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X, Sun, Moon, Monitor } from 'lucide-react';
+import { FileText, LogOut, User, Loader2, Sparkles, History, Layers, Settings2, Save, AlertTriangle, Menu, X, Sun, Moon, Monitor, PencilLine, Eye } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
 import { CreditsProvider, useCredits } from './contexts/CreditsContext';
 import LoginPage from './pages/LoginPage';
@@ -20,7 +20,6 @@ import MatchAnalysis from './components/MatchAnalysis';
 import ActionButtons from './components/ActionButtons';
 import ThemeCustomizationModal from './components/ThemeCustomizationModal';
 import ApiKeyInput from './components/ApiKeyInput';
-import SplashScreen from './components/SplashScreen';
 import CreditsDisplay from './components/CreditsDisplay';
 import ResizableSplitPane from './components/ResizableSplitPane';
 import { useThemeMode } from './hooks/useThemeMode';
@@ -53,6 +52,10 @@ const THEME_MODE_OPTIONS = [
   { value: 'light', label: 'Light', Icon: Sun },
   { value: 'dark', label: 'Dark', Icon: Moon },
   { value: 'system', label: 'System', Icon: Monitor },
+];
+const MOBILE_RESUME_VIEW_OPTIONS = [
+  { value: 'editor', label: 'Editor', Icon: PencilLine },
+  { value: 'preview', label: 'Preview', Icon: Eye },
 ];
 
 function getInitialSidebarWidth() {
@@ -146,7 +149,6 @@ function App() {
   const { credits, hasCredits, purchaseCredits } = useCredits();
   const { themeMode, resolvedTheme, setThemeMode } = useThemeMode(user?.preferences?.themeMode);
   
-  const [showSplash, setShowSplash] = useState(true);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showCreateResume, setShowCreateResume] = useState(false);
   const [showJobModal, setShowJobModal] = useState(false);
@@ -193,6 +195,7 @@ function App() {
   const [pendingNavigation, setPendingNavigation] = useState(null);
 
   const [showLayoutPanel, setShowLayoutPanel] = useState(false);
+  const [mobileResumeView, setMobileResumeView] = useState('editor'); // 'editor' | 'preview'
   // Drive sync status: idle | syncing | synced | error | auth-error
   const [syncStatus, setSyncStatus] = useState('idle');
   const [syncError, setSyncError] = useState('');
@@ -311,6 +314,7 @@ function App() {
       setCurrentResume(resume);
       setJobDescription(resume.jobDescription || '');
       setMatchAnalysis(null);
+      setMobileResumeView('editor');
       
       // Load section order and visibility from group (or use defaults)
       setSectionOrder(group.sectionOrder || DEFAULT_SECTION_ORDER);
@@ -923,12 +927,6 @@ function App() {
     invalidateGoogleAccessToken,
   ]);
 
-  // Show splash
-  if (showSplash) {
-    return <SplashScreen onComplete={() => setShowSplash(false)} />;
-  }
-
-  // Show loading
   const handleEditShared = (group) => {
     setEditSharedGroup(group);
     setShowEditShared(true);
@@ -1438,13 +1436,59 @@ function App() {
                     />
                   </div>
 
-                  {/* Mobile: Editor only */}
-                  <div className="lg:hidden flex-1 min-w-0 overflow-hidden">
-                    <ResumeEditor
-                      resumeData={resumeData}
-                      onUpdate={handleFieldUpdate}
-                      onFormatChange={handleFormatChange}
-                    />
+                  {/* Mobile: switch between editor and preview to keep both surfaces usable. */}
+                  <div className="lg:hidden flex-1 min-w-0 overflow-hidden flex flex-col bg-white">
+                    <div className="h-12 border-b border-neutral-200 bg-neutral-50 px-3 flex items-center justify-between gap-3 flex-shrink-0">
+                      <div className="inline-flex rounded-lg border border-neutral-200 bg-white p-1">
+                        {MOBILE_RESUME_VIEW_OPTIONS.map(({ value, label, Icon }) => {
+                          const active = mobileResumeView === value;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => setMobileResumeView(value)}
+                              aria-pressed={active}
+                              className={`h-8 px-3 rounded-md text-sm font-medium inline-flex items-center gap-2 transition-colors ${
+                                active
+                                  ? 'bg-neutral-900 text-white shadow-sm'
+                                  : 'text-neutral-600 hover:bg-neutral-50'
+                              }`}
+                            >
+                              <Icon className="w-4 h-4" />
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {mobileResumeView === 'preview' && (
+                        <SyncStatusBadge
+                          status={syncStatus}
+                          enabled={driveSyncEnabled}
+                          error={syncError}
+                          onEnable={handleEnableDriveSync}
+                          onReconnect={handleReconnectDrive}
+                          onRetry={handleRetryDriveSync}
+                          onDisconnect={handleDisconnectDrive}
+                        />
+                      )}
+                    </div>
+
+                    {mobileResumeView === 'editor' ? (
+                      <ResumeEditor
+                        resumeData={resumeData}
+                        onUpdate={handleFieldUpdate}
+                        onFormatChange={handleFormatChange}
+                      />
+                    ) : (
+                      <div className="flex-1 min-w-0 overflow-hidden bg-neutral-100 p-3">
+                        <div className="h-full min-w-0 overflow-hidden bg-white rounded-lg shadow-sm border border-neutral-200">
+                          <GeneratedDocxPreview
+                            resumeData={resumeData}
+                            renderOptions={currentRenderOptions}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
