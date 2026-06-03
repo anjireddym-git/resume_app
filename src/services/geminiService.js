@@ -248,6 +248,33 @@ class AIService {
     }
   }
 
+  async parseJobDescription(jobDescription) {
+    const result = await this.callAI({
+      action: 'parseJobDescription',
+      data: { jobDescription },
+    });
+    if (!result.data?.success) throw new Error(result.data?.error || 'AI processing failed');
+    return result.data.data;
+  }
+
+  async explainResumeDiff(baseResume, tailoredResume, jobDescription, jdAnalysis = null) {
+    const result = await this.callAI({
+      action: 'explainResumeDiff',
+      data: { baseResume, tailoredResume, jobDescription, jdAnalysis },
+    });
+    if (!result.data?.success) throw new Error(result.data?.error || 'AI processing failed');
+    return result.data.data;
+  }
+
+  async generateInterviewPrep(resume, jobDescription, jdAnalysis = null) {
+    const result = await this.callAI({
+      action: 'generateInterviewPrep',
+      data: { resume, jobDescription, jdAnalysis },
+    });
+    if (!result.data?.success) throw new Error(result.data?.error || 'AI processing failed');
+    return result.data.data;
+  }
+
   /**
    * Streaming AI Agent (Approach B). Calls the `runResumeAgentStreaming` Cloud
    * Function and forwards thought / answer / usage / validator chunks to the

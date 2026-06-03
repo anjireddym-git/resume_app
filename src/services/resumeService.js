@@ -15,7 +15,7 @@ import {
   increment,
   limit
 } from 'firebase/firestore';
-import { db, storage, storageRef, uploadBytes, getBlob, deleteObject } from '../lib/firebase';
+import { db, functions, httpsCallable, storage, storageRef, uploadBytes, getBlob, deleteObject } from '../lib/firebase';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 import { DEFAULT_SECTION_ORDER } from '../config/templates';
 import { DEFAULT_LAYOUT_CONFIG, normalizeLayoutConfig } from '../config/layoutSchema';
@@ -33,6 +33,16 @@ const DEFAULT_SECTION_FORMATS = {
   hackathons: 'detailed',
   header: 'centered',
 };
+
+const APPLICATION_PIPELINE_STATUSES = new Set([
+  'awaiting_reply',
+  'follow_up_due',
+  'replied',
+  'interviewing',
+  'rejected',
+  'closed',
+  'archived',
+]);
 
 const normalizeSectionFormats = (sectionFormats = {}) => ({
   ...DEFAULT_SECTION_FORMATS,
@@ -835,6 +845,24 @@ export const getSentApplication = async (id) => {
   return { id: snap.id, ...snap.data() };
 };
 
+export const generateApplicationInsights = async (sentApplicationId) => {
+  const generateInsights = httpsCallable(functions, 'generateApplicationInsights');
+  const result = await generateInsights({ sentApplicationId });
+  return result.data || {};
+};
+
+export const updateApplicationPipelineStatus = async (sentApplicationId, status) => {
+  if (!APPLICATION_PIPELINE_STATUSES.has(status)) {
+    throw new Error('Invalid application status');
+  }
+  const ref = doc(db, 'sentApplications', sentApplicationId);
+  await updateDoc(ref, {
+    pipelineStatus: status,
+    pipelineStatusOverride: status,
+    updatedAt: serverTimestamp(),
+  });
+};
+
 /** Fetch reply subdocs (metadata + snippet only) for a sent application. */
 export const getRepliesForApplication = async (sentApplicationId) => {
   const q = query(
@@ -993,6 +1021,7 @@ export const recordFollowUpSent = async (sentApplicationId, message = null) => {
     'followUp.sentCount': newCount,
     'followUp.nextDueAt': nextDueAt,
     'followUp.suppressedReason': newCount >= maxFollowUps ? 'max-reached' : (followUp.suppressedReason || null),
+    pipelineStatus: newCount >= maxFollowUps ? 'closed' : 'awaiting_reply',
   });
 
   if (message?.gmailMessageId) {
@@ -1030,6 +1059,7 @@ export const setFollowUpEnabled = async (sentApplicationId, enabled) => {
     await updateDoc(ref, {
       'followUp.enabled': false,
       'followUp.suppressedReason': 'manual',
+      pipelineStatus: 'closed',
     });
     return;
   }
@@ -1044,13 +1074,17 @@ export const setFollowUpEnabled = async (sentApplicationId, enabled) => {
     'followUp.nextDueAt': currentDueAt > Date.now()
       ? followUp.nextDueAt
       : new Date(Date.now() + computeFollowUpIntervalMs(followUp)),
+    pipelineStatus: 'awaiting_reply',
   });
 };
 
 export const snoozeFollowUp = async (sentApplicationId, days = 3) => {
   const ref = doc(db, 'sentApplications', sentApplicationId);
   const nextDueAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-  await updateDoc(ref, { 'followUp.nextDueAt': nextDueAt });
+  await updateDoc(ref, {
+    'followUp.nextDueAt': nextDueAt,
+    pipelineStatus: 'awaiting_reply',
+  });
 };
 
 // ============================================================================

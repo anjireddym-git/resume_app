@@ -52,6 +52,10 @@ const AI_ACTION_CREDIT_COSTS = Object.freeze({
   generateRecruiterEmail: 0,
   draftFollowUpEmail: 0,
   classifyReplySentiment: 0,
+  parseJobDescription: 0,
+  explainResumeDiff: 0,
+  generateInterviewPrep: 0,
+  generateApplicationInsights: 0,
 });
 
 const FREE_LIGHTWEIGHT_AI_ACTIONS = Object.freeze(

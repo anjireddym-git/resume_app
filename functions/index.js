@@ -41,6 +41,14 @@ const {
   normalizeResumeSkillCategories,
   normalizeSkillCategories,
 } = require('./resumeSkillCategories');
+const {
+  buildInsightMeta,
+  derivePipelineStatusFromApplication,
+  normalizeInterviewPrep,
+  normalizeJdAnalysis,
+  normalizeReplyInsight,
+  normalizeResumeDiff,
+} = require('./applicationInsights');
 
 // Initialize Firebase Admin
 admin.initializeApp();
@@ -70,6 +78,9 @@ const operationModelOverrides = Object.freeze({
   generateRecruiterEmail: defineString('MODEL_GENERATE_RECRUITER_EMAIL', { default: NANO_MODEL }),
   draftFollowUpEmail: defineString('MODEL_DRAFT_FOLLOW_UP_EMAIL', { default: NANO_MODEL }),
   classifyReplySentiment: defineString('MODEL_CLASSIFY_REPLY_SENTIMENT', { default: NANO_MODEL }),
+  parseJobDescription: defineString('MODEL_PARSE_JOB_DESCRIPTION', { default: NANO_MODEL }),
+  explainResumeDiff: defineString('MODEL_EXPLAIN_RESUME_DIFF', { default: NANO_MODEL }),
+  generateInterviewPrep: defineString('MODEL_GENERATE_INTERVIEW_PREP', { default: NANO_MODEL }),
   runResumeAgentStreaming: defineString('MODEL_RUN_RESUME_AGENT_STREAMING', { default: '' }),
 });
 // Optional legacy agent-specific overrides. They are only honored when they
@@ -325,6 +336,15 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
         break;
       case 'classifyReplySentiment':
         result = await classifyReplySentiment(aiClient, model, provider, data.snippet, data.fromAddress);
+        break;
+      case 'parseJobDescription':
+        result = await parseJobDescription(aiClient, model, provider, data.jobDescription);
+        break;
+      case 'explainResumeDiff':
+        result = await explainResumeDiff(aiClient, model, provider, data.baseResume, data.tailoredResume, data.jobDescription, data.jdAnalysis);
+        break;
+      case 'generateInterviewPrep':
+        result = await generateInterviewPrep(aiClient, model, provider, data.resume, data.jobDescription, data.jdAnalysis);
         break;
     }
 
@@ -1625,6 +1645,228 @@ async function draftFollowUpEmail(aiClient, model, provider, data = {}) {
   return parsed;
 }
 
+const insightString = { type: 'string' };
+const insightStringArray = { type: 'array', items: insightString };
+const insightObject = (properties) => ({
+  type: 'object',
+  additionalProperties: false,
+  required: Object.keys(properties),
+  properties,
+});
+
+const JD_ANALYSIS_RESPONSE_FORMAT_OPENAI = {
+  type: 'json_schema',
+  name: 'job_description_analysis',
+  strict: true,
+  schema: insightObject({
+    roleTitle: insightString,
+    company: insightString,
+    seniority: insightString,
+    location: insightString,
+    workMode: { type: 'string', enum: ['remote', 'hybrid', 'onsite', 'unknown'] },
+    employmentType: insightString,
+    requiredSkills: insightStringArray,
+    preferredSkills: insightStringArray,
+    responsibilities: insightStringArray,
+    keywords: insightStringArray,
+    missingSignals: insightStringArray,
+    summary: insightString,
+  }),
+};
+
+const RESUME_DIFF_RESPONSE_FORMAT_OPENAI = {
+  type: 'json_schema',
+  name: 'resume_diff_explanation',
+  strict: true,
+  schema: insightObject({
+    headline: insightString,
+    overallSummary: insightString,
+    keyChanges: insightStringArray,
+    jdReasons: insightStringArray,
+    unsupportedClaimWarnings: insightStringArray,
+    sectionChanges: {
+      type: 'array',
+      items: insightObject({
+        section: insightString,
+        before: insightString,
+        after: insightString,
+        reason: insightString,
+      }),
+    },
+  }),
+};
+
+const INTERVIEW_PREP_RESPONSE_FORMAT_OPENAI = {
+  type: 'json_schema',
+  name: 'interview_prep',
+  strict: true,
+  schema: insightObject({
+    pitch30Second: insightString,
+    pitch2Minute: insightString,
+    roleFitTalkingPoints: insightStringArray,
+    technicalQuestions: insightStringArray,
+    behavioralQuestions: insightStringArray,
+    starStories: insightStringArray,
+    resumeRiskQuestions: insightStringArray,
+    questionsToAsk: insightStringArray,
+    closingStatement: insightString,
+  }),
+};
+
+const REPLY_INSIGHT_RESPONSE_FORMAT_OPENAI = {
+  type: 'json_schema',
+  name: 'reply_insight',
+  strict: true,
+  schema: insightObject({
+    category: { type: 'string', enum: ['positive', 'neutral', 'rejection', 'auto-reply', 'recruiter-follow-up'] },
+    confidence: { type: 'integer' },
+    recommendedAction: {
+      type: 'string',
+      enum: ['draft_reply', 'schedule_interview', 'snooze', 'stop_followups', 'wait', 'close_rejected'],
+    },
+    rationale: insightString,
+    suggestedTone: insightString,
+    followUpSuppressionReason: insightString,
+  }),
+};
+
+async function parseJobDescription(aiClient, model, provider, jobDescription) {
+  const jd = String(jobDescription || '').trim();
+  if (!jd) throw new Error('jobDescription is required');
+  const prompt = `Parse this job description into recruiting intelligence for a job-search CRM.
+
+Return strict JSON only. Separate hard requirements from preferred/nice-to-have skills. Use empty strings or empty arrays when a fact is not present.
+
+JOB DESCRIPTION:
+${jd.slice(0, 16000)}`;
+
+  const text = await callAIText(aiClient, model, provider, prompt, provider === 'openai'
+    ? { textFormat: JD_ANALYSIS_RESPONSE_FORMAT_OPENAI, maxOutputTokens: 3500 }
+    : { maxOutputTokens: 3500 });
+  return normalizeJdAnalysis(parseStrictJson(text) || {}, buildInsightMeta({ provider, model, source: 'jd-parser' }));
+}
+
+async function explainResumeDiff(aiClient, model, provider, baseResume, tailoredResume, jobDescription, jdAnalysis = null) {
+  if (!tailoredResume || typeof tailoredResume !== 'object') throw new Error('tailoredResume is required');
+  const prompt = `Explain how the sent resume differs from the base resume and why those changes help for the JD.
+
+Rules:
+- Tie explanations to concrete JD requirements.
+- Flag any unsupported or potentially overstated claims.
+- If the same resume was used as-is, say that no AI tailoring changes were detected and focus on existing strengths.
+- Keep sectionChanges concise and useful for review.
+- Return strict JSON only.
+
+JD ANALYSIS:
+${JSON.stringify(jdAnalysis || {}, null, 2)}
+
+JOB DESCRIPTION:
+${String(jobDescription || '').slice(0, 12000)}
+
+BASE RESUME:
+${JSON.stringify(baseResume || {}, null, 2).slice(0, 24000)}
+
+SENT RESUME:
+${JSON.stringify(tailoredResume, null, 2).slice(0, 30000)}`;
+
+  const text = await callAIText(aiClient, model, provider, prompt, provider === 'openai'
+    ? { textFormat: RESUME_DIFF_RESPONSE_FORMAT_OPENAI, maxOutputTokens: 5500 }
+    : { maxOutputTokens: 5500 });
+  return normalizeResumeDiff(parseStrictJson(text) || {}, buildInsightMeta({ provider, model, source: 'resume-diff' }));
+}
+
+async function generateInterviewPrep(aiClient, model, provider, resume, jobDescription, jdAnalysis = null) {
+  if (!resume || typeof resume !== 'object') throw new Error('resume is required');
+  const prompt = `Create interview preparation from the EXACT sent resume and the exact job description.
+
+Rules:
+- Use only the supplied resume and JD.
+- Do not invent experience, employers, degrees, certifications, or projects.
+- Questions must be role-specific and tied to the JD/resume.
+- STAR story prompts should point at resume evidence the candidate can discuss.
+- Return strict JSON only.
+
+JD ANALYSIS:
+${JSON.stringify(jdAnalysis || {}, null, 2)}
+
+JOB DESCRIPTION:
+${String(jobDescription || '').slice(0, 14000)}
+
+SENT RESUME:
+${JSON.stringify(resume, null, 2).slice(0, 34000)}`;
+
+  const text = await callAIText(aiClient, model, provider, prompt, provider === 'openai'
+    ? { textFormat: INTERVIEW_PREP_RESPONSE_FORMAT_OPENAI, maxOutputTokens: 6500 }
+    : { maxOutputTokens: 6500 });
+  return normalizeInterviewPrep(parseStrictJson(text) || {}, buildInsightMeta({ provider, model, source: 'interview-prep' }));
+}
+
+async function generateApplicationInsightSnapshots({
+  userId,
+  jobDescription,
+  resumeId,
+  baseResumeId = null,
+  sentResume = null,
+  baseResume = null,
+  existing = {},
+  source = 'application-insights',
+}) {
+  const jd = String(jobDescription || '').trim();
+  if (!jd) throw new Error('jobDescription is required');
+
+  let resultFull = sentResume;
+  let baseFull = baseResume;
+  if (!resultFull) {
+    if (!resumeId) throw new Error('resumeId is required');
+    resultFull = (await loadFullResumeForOutreach(userId, resumeId)).full;
+  }
+  if (!baseFull) {
+    const resolvedBaseId = baseResumeId || resumeId;
+    baseFull = resolvedBaseId ? (await loadFullResumeForOutreach(userId, resolvedBaseId)).full : resultFull;
+  }
+
+  const provider = getConfiguredProvider();
+  const aiClient = createAiClient(provider);
+  const jdModel = getConfiguredModel(provider, { action: 'parseJobDescription' });
+  const diffModel = getConfiguredModel(provider, { action: 'explainResumeDiff' });
+  const prepModel = getConfiguredModel(provider, { action: 'generateInterviewPrep' });
+
+  const jdAnalysis = existing.jdAnalysis || await parseJobDescription(aiClient, jdModel, provider, jd);
+  const resumeDiff = existing.resumeDiff || await explainResumeDiff(
+    aiClient,
+    diffModel,
+    provider,
+    baseFull,
+    resultFull,
+    jd,
+    jdAnalysis,
+  );
+  const interviewPrep = existing.interviewPrep || await generateInterviewPrep(
+    aiClient,
+    prepModel,
+    provider,
+    resultFull,
+    jd,
+    jdAnalysis,
+  );
+
+  return {
+    jdAnalysis: {
+      ...jdAnalysis,
+      meta: { ...jdAnalysis.meta, source },
+    },
+    resumeDiff: {
+      ...resumeDiff,
+      meta: { ...resumeDiff.meta, source },
+    },
+    interviewPrep: {
+      ...interviewPrep,
+      meta: { ...interviewPrep.meta, source },
+    },
+    insightsUpdatedAt: serverTimestamp(),
+  };
+}
+
 // ============================================================================
 // Persistent Outreach Flows
 // ============================================================================
@@ -2091,8 +2333,15 @@ exports.completeOutreachSend = onCall({ cors: true }, async (request) => {
       gmailThreadId: gmail.gmailThreadId,
       gmailMessageIdHeader: gmail.gmailMessageIdHeader || null,
       matchAnalysis: flow.matchAnalysis || null,
+      jdAnalysis: flow.jdAnalysis || null,
+      resumeDiff: flow.resumeDiff || null,
+      interviewPrep: flow.interviewPrep || null,
+      insightsUpdatedAt: flow.insightsUpdatedAt || null,
       replyCount: 0,
       lastReplyAt: null,
+      replyInsights: null,
+      pipelineStatus: 'awaiting_reply',
+      pipelineStatusOverride: null,
       followUp: followUp
         ? {
             enabled: !!followUp.enabled,
@@ -2134,6 +2383,53 @@ exports.completeOutreachSend = onCall({ cors: true }, async (request) => {
   await addOutreachFlowEvent(flowRef, 'sent', 'Email sent successfully.', { sentApplicationId });
   return { sentApplicationId };
 });
+
+exports.generateApplicationInsights = onCall(
+  { cors: true, secrets: [geminiApiKey, openaiApiKey], timeoutSeconds: 300, memory: '1GiB' },
+  async (request) => {
+    if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
+    const userId = request.auth.uid;
+    const sentApplicationId = String(request.data?.sentApplicationId || '').trim();
+    if (!sentApplicationId) throw new HttpsError('invalid-argument', 'sentApplicationId is required');
+
+    const appRef = db.collection('sentApplications').doc(sentApplicationId);
+    const appSnap = await appRef.get();
+    if (!appSnap.exists) throw new HttpsError('not-found', 'Sent application not found');
+    const app = { id: appSnap.id, ...appSnap.data() };
+    if (app.userId !== userId) throw new HttpsError('permission-denied', 'Sent application does not belong to this user');
+    if (!app.jobDescription) throw new HttpsError('failed-precondition', 'This application has no job description');
+    if (!app.resumeId) throw new HttpsError('failed-precondition', 'This application has no sent resume');
+
+    const snapshots = await generateApplicationInsightSnapshots({
+      userId,
+      jobDescription: app.jobDescription,
+      resumeId: app.resumeId,
+      baseResumeId: app.baseResumeId || app.resumeId,
+      existing: {
+        jdAnalysis: app.jdAnalysis || null,
+        resumeDiff: app.resumeDiff || null,
+        interviewPrep: app.interviewPrep || null,
+      },
+      source: 'lazy-backfill',
+    });
+    const nextApp = {
+      ...app,
+      jdAnalysis: snapshots.jdAnalysis,
+      resumeDiff: snapshots.resumeDiff,
+      interviewPrep: snapshots.interviewPrep,
+    };
+    await appRef.set(sanitizeFirestoreValue({
+      ...snapshots,
+      pipelineStatus: derivePipelineStatusFromApplication(nextApp),
+    }), { merge: true });
+
+    return {
+      jdAnalysis: snapshots.jdAnalysis,
+      resumeDiff: snapshots.resumeDiff,
+      interviewPrep: snapshots.interviewPrep,
+    };
+  }
+);
 
 exports.processQueuedOutreachFlow = onDocumentUpdated(
   {
@@ -2371,6 +2667,30 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
         confidence: draft.confidence ?? 0,
       });
 
+      let insightSnapshots = null;
+      try {
+        insightSnapshots = await generateApplicationInsightSnapshots({
+          userId,
+          jobDescription: flow.jobDescription,
+          resumeId: resultResumeId,
+          baseResumeId: source.resume.id,
+          sentResume: resultResume,
+          baseResume: source.full,
+          existing: {
+            jdAnalysis: flow.jdAnalysis || null,
+            resumeDiff: flow.resumeDiff || null,
+            interviewPrep: flow.interviewPrep || null,
+          },
+          source: 'outreach-flow-worker',
+        });
+        await addOutreachFlowEvent(flowRef, 'insights_generated', 'Application insights generated.');
+      } catch (insightErr) {
+        console.warn('[outreach.flow] insight generation failed:', insightErr?.message || insightErr);
+        await addOutreachFlowEvent(flowRef, 'insights_failed', 'Application insights could not be generated yet.', {
+          message: insightErr?.message || String(insightErr),
+        }).catch(() => {});
+      }
+
       await updateOutreachFlowProgress(flowRef, {
         status: 'ready_to_send',
         isActive: true,
@@ -2378,6 +2698,7 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
         groupId: baseGroup?.id || flow.groupId || null,
         emailDraft,
         followUp: normalizeFollowUpServer(flow.followUp, settings),
+        ...(insightSnapshots || {}),
         error: null,
         workerLease: null,
         progress: {
@@ -2420,19 +2741,28 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
  * auto-suppress follow-ups for explicit rejections / out-of-office messages.
  */
 async function classifyReplySentiment(aiClient, model, provider, snippet, fromAddress) {
-  const prompt = `Classify this reply snippet from "${fromAddress || 'unknown'}". Return STRICT JSON only:
-{
-  "category": "positive" | "neutral" | "rejection" | "auto-reply" | "recruiter-follow-up",
-  "confidence": <int 0-100>
-}
+  const prompt = `Classify this recruiter reply for a job-search CRM. Return STRICT JSON only.
+
+Categories:
+- positive: positive interest or asks to continue
+- recruiter-follow-up: asks for info, availability, work authorization, resume, or scheduling details
+- rejection: explicit rejection or role closed
+- auto-reply: out-of-office, automatic receipt, or automated mailbox response
+- neutral: unclear human reply
 
 SNIPPET:
-${(snippet || '').slice(0, 600)}`;
-  let text = await callAIText(aiClient, model, provider, prompt);
+${(snippet || '').slice(0, 1200)}
+
+FROM:
+${fromAddress || 'unknown'}`;
+  let text = await callAIText(aiClient, model, provider, prompt, provider === 'openai'
+    ? { textFormat: REPLY_INSIGHT_RESPONSE_FORMAT_OPENAI, maxOutputTokens: 1200 }
+    : { maxOutputTokens: 1200 });
   text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  const parsed = parseStrictJson(text);
-  if (!parsed) return { category: 'neutral', confidence: 0 };
-  return parsed;
+  return normalizeReplyInsight(
+    parseStrictJson(text) || { category: 'neutral', confidence: 0, recommendedAction: 'wait' },
+    buildInsightMeta({ provider, model, source: 'reply-classifier' }),
+  );
 }
 
 // ============================================================================
@@ -2669,7 +2999,7 @@ exports.onGmailReply = onMessagePublished(GMAIL_PUBSUB_TOPIC, async (event) => {
  *
  * Returns { matches: [{ threadId, messageId, snippet, from, receivedAt, subject, sentApplicationId }], newHistoryId }
  */
-exports.fetchGmailHistory = onCall({ cors: true }, async (request) => {
+exports.fetchGmailHistory = onCall({ cors: true, secrets: [geminiApiKey, openaiApiKey], timeoutSeconds: 300 }, async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
   const { accessToken, sinceHistoryId, backfillThreads = false } = request.data || {};
   if (!accessToken) throw new HttpsError('invalid-argument', 'accessToken is required');
@@ -2710,6 +3040,9 @@ exports.fetchGmailHistory = onCall({ cors: true }, async (request) => {
   ).toLowerCase();
   let newHistoryId = profile.historyId || startHistoryId || null;
   const matchesByMessageId = new Map();
+  const replyProvider = getConfiguredProvider();
+  const replyModel = getConfiguredModel(replyProvider, { action: 'classifyReplySentiment' });
+  const replyAiClient = createAiClient(replyProvider);
 
   const persistThreadMessage = async (msg) => {
     if (!msg?.id || !msg?.threadId) return null;
@@ -2766,6 +3099,24 @@ exports.fetchGmailHistory = onCall({ cors: true }, async (request) => {
 
     const replyRef = appRef.collection('replies').doc(msg.id);
     const existingReply = await replyRef.get();
+    let replyInsight = existingReply.exists ? existingReply.data()?.replyInsight : null;
+    if (!replyInsight) {
+      try {
+        replyInsight = await classifyReplySentiment(
+          replyAiClient,
+          replyModel,
+          replyProvider,
+          body || msg.snippet || '',
+          fromHeader,
+        );
+      } catch (classifyErr) {
+        console.warn('[gmail.history] reply classification failed:', classifyErr?.message || classifyErr);
+        replyInsight = normalizeReplyInsight(
+          { category: 'neutral', confidence: 0, recommendedAction: 'wait' },
+          buildInsightMeta({ provider: replyProvider, model: replyModel, source: 'reply-classifier-fallback' }),
+        );
+      }
+    }
     const payload = {
       userId,
       sentApplicationId,
@@ -2776,6 +3127,8 @@ exports.fetchGmailHistory = onCall({ cors: true }, async (request) => {
       subject: headers.subject || app.subject || '',
       body,
       snippet: msg.snippet || '',
+      replyInsight,
+      category: replyInsight.category,
       receivedAt: headers.date || new Date().toISOString(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
@@ -2787,12 +3140,34 @@ exports.fetchGmailHistory = onCall({ cors: true }, async (request) => {
 
     // Keep replyCount idempotent: only increment the first time this Gmail
     // message is imported. Refresh/backfill can safely run repeatedly.
-    if (!existingReply.exists) {
-      await appRef.set({
+    if (!existingReply.exists || !existingReply.data()?.replyInsight) {
+      const appPatch = {
         lastReplyAt: admin.firestore.FieldValue.serverTimestamp(),
-        replyCount: admin.firestore.FieldValue.increment(1),
-        'followUp.suppressedReason': 'reply-received',
-      }, { merge: true });
+        replyInsights: {
+          ...replyInsight,
+          lastReplyId: msg.id,
+          lastReplyAt: new Date().toISOString(),
+        },
+        pipelineStatus: replyInsight.category === 'rejection'
+          ? 'rejected'
+          : (replyInsight.category === 'auto-reply' ? 'awaiting_reply' : 'replied'),
+      };
+      if (!existingReply.exists) {
+        appPatch.replyCount = admin.firestore.FieldValue.increment(1);
+      }
+      if (replyInsight.category === 'auto-reply') {
+        appPatch['followUp.suppressedReason'] = null;
+        if (app.followUp?.enabled) {
+          appPatch['followUp.nextDueAt'] = admin.firestore.Timestamp.fromDate(
+            new Date(Date.now() + _followUpIntervalMs(app.followUp)),
+          );
+        }
+      } else {
+        appPatch['followUp.suppressedReason'] = replyInsight.category === 'rejection'
+          ? 'rejection'
+          : 'reply-received';
+      }
+      await appRef.set(appPatch, { merge: true });
     }
 
     return match;
@@ -2951,6 +3326,7 @@ exports.scanDueFollowUps = onSchedule('every 5 minutes', async () => {
       // Advance nextDueAt so we don't keep firing on the same window.
       const nextDate = new Date(Date.now() + _followUpIntervalMs(followUp));
       transaction.update(docSnap.ref, {
+        pipelineStatus: 'follow_up_due',
         'followUp.nextDueAt': admin.firestore.Timestamp.fromDate(nextDate),
       });
       return notificationSnap.exists ? 'advanced' : 'created';

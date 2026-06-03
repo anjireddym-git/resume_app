@@ -10,11 +10,25 @@ import {
 import SentDetailPanel from './SentDetailPanel';
 
 const FILTERS = [
-  { id: 'all',      label: 'All' },
-  { id: 'awaiting', label: 'Awaiting reply' },
-  { id: 'replied',  label: 'Replied' },
-  { id: 'followup', label: 'Follow-up due' },
+  { id: 'all', label: 'All' },
+  { id: 'awaiting_reply', label: 'Awaiting' },
+  { id: 'follow_up_due', label: 'Due' },
+  { id: 'replied', label: 'Replied' },
+  { id: 'interviewing', label: 'Interviewing' },
+  { id: 'rejected', label: 'Rejected' },
+  { id: 'closed', label: 'Closed' },
+  { id: 'missing_insights', label: 'Missing insights' },
 ];
+
+const STATUS_META = {
+  awaiting_reply: { label: 'Awaiting reply', tone: 'bg-neutral-100 text-neutral-600' },
+  follow_up_due: { label: 'Follow-up due', tone: 'bg-amber-100 text-amber-700' },
+  replied: { label: 'Replied', tone: 'bg-emerald-100 text-emerald-700' },
+  interviewing: { label: 'Interviewing', tone: 'bg-blue-100 text-blue-700' },
+  rejected: { label: 'Rejected', tone: 'bg-red-100 text-red-700' },
+  closed: { label: 'Closed', tone: 'bg-neutral-200 text-neutral-700' },
+  archived: { label: 'Archived', tone: 'bg-neutral-100 text-neutral-500' },
+};
 
 const formatDate = (ts) => {
   if (!ts) return '';
@@ -27,10 +41,29 @@ const formatDate = (ts) => {
   return d.toLocaleDateString();
 };
 
+const toMillis = (ts) => {
+  if (!ts) return 0;
+  if (typeof ts.toMillis === 'function') return ts.toMillis();
+  const value = new Date(ts).getTime();
+  return Number.isNaN(value) ? 0 : value;
+};
+
+const hasInsights = (app) => !!(app.jdAnalysis && app.resumeDiff && app.interviewPrep);
+
 const deriveStatus = (app) => {
-  if ((app.replyCount || 0) > 0) return { id: 'replied', label: 'Replied', tone: 'bg-emerald-100 text-emerald-700' };
-  if ((app.followUp?.sentCount || 0) > 0) return { id: 'followup', label: 'Follow-up sent', tone: 'bg-amber-100 text-amber-700' };
-  return { id: 'awaiting', label: 'Awaiting reply', tone: 'bg-neutral-100 text-neutral-600' };
+  if (app.pipelineStatusOverride && STATUS_META[app.pipelineStatusOverride]) {
+    return { id: app.pipelineStatusOverride, ...STATUS_META[app.pipelineStatusOverride] };
+  }
+  if (['replied', 'interviewing', 'rejected', 'closed', 'archived'].includes(app.pipelineStatus)) {
+    return { id: app.pipelineStatus, ...STATUS_META[app.pipelineStatus] };
+  }
+  if (app.replyInsights?.category === 'rejection') return { id: 'rejected', ...STATUS_META.rejected };
+  if ((app.replyCount || 0) > 0) return { id: 'replied', ...STATUS_META.replied };
+  const dueAt = toMillis(app.followUp?.nextDueAt);
+  if (app.followUp?.enabled && !app.followUp?.suppressedReason && dueAt && dueAt <= Date.now()) {
+    return { id: 'follow_up_due', ...STATUS_META.follow_up_due };
+  }
+  return { id: 'awaiting_reply', ...STATUS_META.awaiting_reply };
 };
 
 const SentView = ({ user, selectedAppId, refreshKey, onSelect, onCompose }) => {
@@ -67,16 +100,38 @@ const SentView = ({ user, selectedAppId, refreshKey, onSelect, onCompose }) => {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return apps.filter((a) => {
-      if (filter !== 'all') {
+      if (filter === 'missing_insights') {
+        if (hasInsights(a)) return false;
+      } else if (filter !== 'all') {
         const s = deriveStatus(a).id;
         if (s !== filter) return false;
       }
       if (!q) return true;
       return (a.subject || '').toLowerCase().includes(q)
         || (a.recipientEmail || '').toLowerCase().includes(q)
-        || (a.recipientName || '').toLowerCase().includes(q);
+        || (a.recipientName || '').toLowerCase().includes(q)
+        || (a.jdAnalysis?.roleTitle || '').toLowerCase().includes(q)
+        || (a.jdAnalysis?.company || '').toLowerCase().includes(q);
     });
   }, [apps, filter, query]);
+
+  const stats = useMemo(() => {
+    const base = {
+      all: apps.length,
+      awaiting_reply: 0,
+      follow_up_due: 0,
+      replied: 0,
+      interviewing: 0,
+      rejected: 0,
+      missing_insights: 0,
+    };
+    apps.forEach((app) => {
+      const status = deriveStatus(app).id;
+      if (Object.prototype.hasOwnProperty.call(base, status)) base[status] += 1;
+      if (!hasInsights(app)) base.missing_insights += 1;
+    });
+    return base;
+  }, [apps]);
 
   if (apps.length === 0 && !loading) {
     return (
@@ -99,14 +154,32 @@ const SentView = ({ user, selectedAppId, refreshKey, onSelect, onCompose }) => {
     <div className="h-full flex">
       {/* List pane */}
       <div className={`${selectedApp ? 'hidden lg:flex' : 'flex'} flex-col w-full lg:w-96 border-r border-neutral-200 bg-white`}>
-        <div className="p-4 border-b border-neutral-200 space-y-2">
-          <h1 className="text-lg font-semibold text-neutral-900">Sent ({apps.length})</h1>
+        <div className="p-4 border-b border-neutral-200 space-y-3">
+          <div>
+            <h1 className="text-lg font-semibold text-neutral-900">Application CRM</h1>
+            <p className="text-xs text-neutral-500 mt-0.5">Outreach emails and reply follow-up pipeline.</p>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              ['Sent', stats.all],
+              ['Awaiting', stats.awaiting_reply],
+              ['Due', stats.follow_up_due],
+              ['Replied', stats.replied],
+              ['Interview', stats.interviewing],
+              ['Rejected', stats.rejected],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-neutral-200 bg-neutral-50 px-2.5 py-2">
+                <div className="text-[10px] uppercase tracking-wide text-neutral-400 font-semibold">{label}</div>
+                <div className="text-lg font-semibold text-neutral-900">{value}</div>
+              </div>
+            ))}
+          </div>
           <div className="relative">
             <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search subject, recipient…"
+              placeholder="Search subject, recipient, role…"
               className="w-full h-9 pl-8 pr-3 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:border-neutral-400"
             />
           </div>
@@ -150,8 +223,15 @@ const SentView = ({ user, selectedAppId, refreshKey, onSelect, onCompose }) => {
                     <span className="text-[11px] text-neutral-400 flex-shrink-0">{formatDate(a.sentAt)}</span>
                   </div>
                   <div className="text-sm font-medium text-neutral-900 truncate">{a.subject || '(no subject)'}</div>
+                  <div className="text-xs text-neutral-500 truncate mt-0.5">
+                    {a.jdAnalysis?.roleTitle || 'Role not parsed'}
+                    {a.jdAnalysis?.company ? ` · ${a.jdAnalysis.company}` : ''}
+                  </div>
                   <div className="flex items-center gap-2 mt-1.5">
                     <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${status.tone}`}>{status.label}</span>
+                    {!hasInsights(a) && (
+                      <span className="text-[10px] text-amber-600">Needs insights</span>
+                    )}
                     {(a.replyCount || 0) > 0 && (
                       <span className="text-[10px] text-neutral-500 flex items-center gap-0.5">
                         <Inbox className="w-3 h-3" />{a.replyCount}

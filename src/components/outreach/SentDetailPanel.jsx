@@ -10,18 +10,30 @@ import {
   getRepliesForApplication,
   getOutgoingMessagesForApplication,
   buildFollowUpDraftContext,
+  generateApplicationInsights,
   markReplySeen,
   snoozeFollowUp,
   setFollowUpEnabled,
   recordFollowUpSent,
   getUserSettings,
   listEmailTemplates,
+  updateApplicationPipelineStatus,
 } from '../../services/resumeService';
 import { geminiService } from '../../services/geminiService';
 import { sendGmail, getMessageIdHeader, GmailAuthError } from '../../services/gmailService';
 import { buildOutreachUserContext } from '../../services/outreachAiContext';
 
 const fetchGmailHistoryFn = httpsCallable(functions, 'fetchGmailHistory');
+
+const STATUS_OPTIONS = [
+  { id: 'awaiting_reply', label: 'Awaiting reply' },
+  { id: 'follow_up_due', label: 'Follow-up due' },
+  { id: 'replied', label: 'Replied' },
+  { id: 'interviewing', label: 'Interviewing' },
+  { id: 'rejected', label: 'Rejected' },
+  { id: 'closed', label: 'Closed' },
+  { id: 'archived', label: 'Archived' },
+];
 
 const formatDate = (ts) => {
   if (!ts) return '';
@@ -49,6 +61,30 @@ const initialsFor = (value = '') => {
   return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : parts[0]?.slice(0, 2) || '?').toUpperCase();
 };
 
+const InsightList = ({ title, items = [], tone = 'default' }) => {
+  const values = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (values.length === 0) return null;
+  return (
+    <div>
+      <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">{title}</div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {values.slice(0, 18).map((item, index) => (
+          <span
+            key={`${title}-${item}-${index}`}
+            className={`px-2 py-1 rounded-full text-xs ${
+              tone === 'warning'
+                ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                : 'bg-neutral-100 text-neutral-700'
+            }`}
+          >
+            {item}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
   const { ensureGmailAccess } = useAuth();
   const [replies, setReplies] = useState([]);
@@ -57,6 +93,8 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [refreshingThread, setRefreshingThread] = useState(false);
+  const [insightsBusy, setInsightsBusy] = useState(false);
+  const [statusBusy, setStatusBusy] = useState(false);
 
   const [draft, setDraft] = useState(null); // { subject, body }
   const [drafting, setDrafting] = useState(false);
@@ -206,7 +244,36 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
     catch (e) { setError(e.message); }
   };
 
+  const handleGenerateInsights = async () => {
+    setInsightsBusy(true); setError('');
+    try {
+      await generateApplicationInsights(application.id);
+      if (onChange) onChange();
+    } catch (err) {
+      console.error(err);
+      setError(err.message || 'Failed to generate application insights.');
+    } finally {
+      setInsightsBusy(false);
+    }
+  };
+
+  const handleStatusChange = async (event) => {
+    const status = event.target.value;
+    setStatusBusy(true); setError('');
+    try {
+      await updateApplicationPipelineStatus(application.id, status);
+      if (onChange) onChange();
+    } catch (err) {
+      setError(err.message || 'Failed to update application status.');
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+
   const followUp = application.followUp || {};
+  const hasInsights = !!(application.jdAnalysis && application.resumeDiff && application.interviewPrep);
+  const currentStatus = application.pipelineStatusOverride || application.pipelineStatus || 'awaiting_reply';
+  const latestReplyInsight = application.replyInsights || null;
   const conversation = useMemo(() => {
     const messages = [
       {
@@ -257,9 +324,33 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
         <div className="flex items-start justify-between gap-3 p-5 border-b border-neutral-200">
           <div className="min-w-0 flex-1">
             <h2 className="text-lg font-semibold text-neutral-900 break-words">{application.subject}</h2>
-            <div className="text-xs text-neutral-500 mt-1">{conversation.length} messages in this thread</div>
+            <div className="text-xs text-neutral-500 mt-1">
+              {conversation.length} messages in this thread
+              {application.jdAnalysis?.roleTitle ? ` · ${application.jdAnalysis.roleTitle}` : ''}
+            </div>
           </div>
-          <div className="flex items-center gap-3 flex-shrink-0">
+          <div className="flex flex-wrap items-center justify-end gap-2 flex-shrink-0">
+            <select
+              value={currentStatus}
+              onChange={handleStatusChange}
+              disabled={statusBusy}
+              className="h-8 px-2 text-xs border border-neutral-200 rounded-lg bg-white text-neutral-700 focus:outline-none focus:border-neutral-400"
+              title="Application status"
+            >
+              {STATUS_OPTIONS.map((status) => (
+                <option key={status.id} value={status.id}>{status.label}</option>
+              ))}
+            </select>
+            {!hasInsights && (
+              <button
+                onClick={handleGenerateInsights}
+                disabled={insightsBusy}
+                className="h-8 px-2 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1"
+              >
+                {insightsBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                Generate insights
+              </button>
+            )}
             <button
               onClick={handleRefreshConversation}
               disabled={refreshingThread}
@@ -321,6 +412,90 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
             ))}
           </div>
         )}
+      </div>
+
+      <div className="grid gap-4 mb-4">
+        {latestReplyInsight && (
+          <div className="bg-white border border-neutral-200 rounded-xl p-5">
+            <h3 className="text-sm font-semibold text-neutral-900">Reply recommendation</h3>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+              <span className="px-2 py-1 rounded-full bg-violet-50 text-violet-700 font-semibold">
+                {latestReplyInsight.category || 'neutral'} · {Math.round(latestReplyInsight.confidence || 0)}%
+              </span>
+              <span className="px-2 py-1 rounded-full bg-neutral-100 text-neutral-700 font-semibold">
+                {String(latestReplyInsight.recommendedAction || 'wait').replace(/_/g, ' ')}
+              </span>
+            </div>
+            {latestReplyInsight.rationale && (
+              <p className="text-sm text-neutral-700 mt-3 leading-6">{latestReplyInsight.rationale}</p>
+            )}
+          </div>
+        )}
+
+        <div className="bg-white border border-neutral-200 rounded-xl p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-neutral-900">JD match intelligence</h3>
+            {!application.jdAnalysis && <span className="text-xs text-neutral-400">Not generated</span>}
+          </div>
+          {application.jdAnalysis ? (
+            <div className="mt-3 space-y-3">
+              <p className="text-sm text-neutral-700 leading-6">{application.jdAnalysis.summary || 'No summary available.'}</p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <InsightList title="Required" items={application.jdAnalysis.requiredSkills} />
+                <InsightList title="Preferred" items={application.jdAnalysis.preferredSkills} />
+              </div>
+              <InsightList title="Responsibilities" items={application.jdAnalysis.responsibilities} />
+            </div>
+          ) : (
+            <p className="text-sm text-neutral-500 mt-2">Generate insights to extract requirements and keywords from the job description.</p>
+          )}
+        </div>
+
+        <div className="bg-white border border-neutral-200 rounded-xl p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-neutral-900">Resume diff explanation</h3>
+            {!application.resumeDiff && <span className="text-xs text-neutral-400">Not generated</span>}
+          </div>
+          {application.resumeDiff ? (
+            <div className="mt-3 space-y-3">
+              <p className="text-sm text-neutral-700 leading-6">{application.resumeDiff.overallSummary || application.resumeDiff.headline}</p>
+              <InsightList title="Key changes" items={application.resumeDiff.keyChanges} />
+              <InsightList title="Why it helps" items={application.resumeDiff.jdReasons} />
+              {application.resumeDiff.unsupportedClaimWarnings?.length > 0 && (
+                <InsightList title="Review warnings" items={application.resumeDiff.unsupportedClaimWarnings} tone="warning" />
+              )}
+              {(application.resumeDiff.sectionChanges || []).slice(0, 6).map((change, index) => (
+                <div key={`${change.section}-${index}`} className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">{change.section || 'Section'}</div>
+                  <p className="text-sm text-neutral-700 mt-1">{change.reason}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-neutral-500 mt-2">Generate insights to see what changed and why.</p>
+          )}
+        </div>
+
+        <div className="bg-white border border-neutral-200 rounded-xl p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-neutral-900">Interview prep</h3>
+            {!application.interviewPrep && <span className="text-xs text-neutral-400">Not generated</span>}
+          </div>
+          {application.interviewPrep ? (
+            <div className="mt-3 space-y-3">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">30-second pitch</div>
+                <p className="text-sm text-neutral-700 mt-1 leading-6">{application.interviewPrep.pitch30Second}</p>
+              </div>
+              <InsightList title="Role fit" items={application.interviewPrep.roleFitTalkingPoints} />
+              <InsightList title="Technical questions" items={application.interviewPrep.technicalQuestions} />
+              <InsightList title="Behavioral questions" items={application.interviewPrep.behavioralQuestions} />
+              <InsightList title="Questions to ask" items={application.interviewPrep.questionsToAsk} />
+            </div>
+          ) : (
+            <p className="text-sm text-neutral-500 mt-2">Generate insights to prepare for recruiter and interview conversations.</p>
+          )}
+        </div>
       </div>
 
       {/* Follow-up controls */}

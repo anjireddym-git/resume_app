@@ -8,6 +8,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  ExternalLink,
   FileText,
   Loader2,
   Mail,
@@ -27,6 +28,7 @@ import {
   getResume,
   getResumeGroup,
   getResumeGroups,
+  getSentApplications,
   getUserSettings,
   listEmailTemplates,
 } from '../../services/resumeService';
@@ -79,6 +81,12 @@ const FILTERS = [
   { id: 'all', label: 'All' },
 ];
 
+const EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+
+const extractEmailsFromText = (text = '') => (
+  [...new Set((String(text || '').match(EMAIL_REGEX) || []).map((email) => email.toLowerCase()))]
+);
+
 const formatDate = (value) => {
   if (!value) return '';
   const d = value.toDate ? value.toDate() : new Date(value);
@@ -93,6 +101,17 @@ const splitEmailList = (value) => String(value || '')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
+
+const getApplicationEmails = (app) => [
+  app.recipientEmail,
+  ...(Array.isArray(app.cc) ? app.cc : []),
+  ...(Array.isArray(app.bcc) ? app.bcc : []),
+].map((email) => String(email || '').trim().toLowerCase()).filter(Boolean);
+
+const emailMatchesApplication = (emails, app) => {
+  const target = new Set(emails);
+  return getApplicationEmails(app).filter((email) => target.has(email));
+};
 
 const StatusPill = ({ status }) => {
   const meta = getOutreachFlowStatusMeta(status);
@@ -133,35 +152,152 @@ const FlowListItem = ({ flow, active, onSelect }) => {
   );
 };
 
-const NewFlowForm = ({ onCreate, busy }) => {
-  const [jobDescription, setJobDescription] = useState('');
+const EmailHistoryPanel = ({ emails = [], sentApplications = [], loading, error, embedded = false }) => {
+  const matches = useMemo(() => (
+    sentApplications
+      .map((app) => ({ app, matchedEmails: emailMatchesApplication(emails, app) }))
+      .filter((item) => item.matchedEmails.length > 0)
+      .sort((a, b) => {
+        const aTime = a.app.sentAt?.toMillis?.() || new Date(a.app.sentAt || 0).getTime();
+        const bTime = b.app.sentAt?.toMillis?.() || new Date(b.app.sentAt || 0).getTime();
+        return bTime - aTime;
+      })
+  ), [emails, sentApplications]);
+
   return (
-    <div className="max-w-3xl mx-auto p-6 lg:p-8">
-      <div className="mb-5">
-        <h1 className="text-2xl font-semibold text-neutral-900">New outreach flow</h1>
-        <p className="text-sm text-neutral-500 mt-1">
-          Paste a job description. The flow is saved immediately after creation and can run alongside other jobs.
-        </p>
-      </div>
-      <div className="bg-white border border-neutral-200 rounded-xl p-5 space-y-3">
-        <label className="text-sm font-medium text-neutral-700">Job description</label>
-        <textarea
-          value={jobDescription}
-          onChange={(event) => setJobDescription(event.target.value)}
-          placeholder="Paste the full job posting here."
-          className="w-full h-80 p-3 text-sm border border-neutral-200 rounded-lg resize-none focus:outline-none focus:border-neutral-400"
-        />
-        <div className="flex items-center justify-end">
-          <button
-            type="button"
-            onClick={() => onCreate(jobDescription)}
-            disabled={busy || !jobDescription.trim()}
-            className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-2"
-          >
-            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-            Create flow
-          </button>
+    <aside className={embedded
+      ? 'border-t xl:border-t-0 xl:border-l border-neutral-200 pt-4 xl:pt-0 xl:pl-5 h-fit'
+      : 'bg-white border border-neutral-200 rounded-xl p-4 h-fit lg:sticky lg:top-6'}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-neutral-900">Previous emails</h2>
+          <p className="text-xs text-neutral-500 mt-0.5">Matched from recruiter emails in recent sent outreach.</p>
         </div>
+        {loading && <Loader2 className="w-4 h-4 animate-spin text-neutral-400" />}
+      </div>
+
+      {emails.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {emails.map((email) => (
+            <span key={email} className="px-2 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-medium break-all">
+              {email}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-4 rounded-lg border border-dashed border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-500">
+          Paste a JD with an email address and prior outreach to that address will show here.
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+          {error}
+        </div>
+      )}
+
+      {emails.length > 0 && !loading && matches.length === 0 && (
+        <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+          No previous outreach found in recent sent history for the extracted email{emails.length > 1 ? 's' : ''}.
+        </div>
+      )}
+
+      {matches.length > 0 && (
+        <div className="mt-4 space-y-2">
+          <div className="text-xs font-medium text-neutral-500">
+            {matches.length} previous email{matches.length === 1 ? '' : 's'} found
+          </div>
+          {matches.slice(0, 12).map(({ app, matchedEmails }) => (
+            <div key={app.id} className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-xs text-neutral-500 truncate">
+                    {matchedEmails.join(', ')}
+                  </div>
+                  <div className="text-sm font-medium text-neutral-900 line-clamp-2 mt-0.5">
+                    {app.subject || '(no subject)'}
+                  </div>
+                </div>
+                <span className="text-[11px] text-neutral-400 flex-shrink-0">{formatDate(app.sentAt)}</span>
+              </div>
+              {app.jdAnalysis?.roleTitle && (
+                <div className="mt-1 text-xs text-neutral-500 truncate">
+                  {app.jdAnalysis.roleTitle}{app.jdAnalysis.company ? ` · ${app.jdAnalysis.company}` : ''}
+                </div>
+              )}
+              {app.body && (
+                <p className="mt-2 text-xs text-neutral-600 line-clamp-3">
+                  {String(app.body).replace(/\s+/g, ' ').trim()}
+                </p>
+              )}
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-neutral-500">
+                {(app.replyCount || 0) > 0 && <span>{app.replyCount} repl{app.replyCount === 1 ? 'y' : 'ies'}</span>}
+                {(app.followUp?.sentCount || 0) > 0 && <span>F/U {app.followUp.sentCount}</span>}
+                {app.gmailThreadId && (
+                  <a
+                    href={`https://mail.google.com/mail/u/0/#sent/${app.gmailThreadId}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="ml-auto text-blue-600 hover:underline inline-flex items-center gap-1"
+                  >
+                    Gmail <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+            </div>
+          ))}
+          {matches.length > 12 && (
+            <div className="text-xs text-neutral-500 text-center pt-1">
+              Showing latest 12 matches.
+            </div>
+          )}
+        </div>
+      )}
+    </aside>
+  );
+};
+
+const NewFlowForm = ({ onCreate, busy, sentApplications, sentApplicationsLoading, sentApplicationsError }) => {
+  const [jobDescription, setJobDescription] = useState('');
+  const extractedEmails = useMemo(() => extractEmailsFromText(jobDescription), [jobDescription]);
+  return (
+    <div className="max-w-7xl mx-auto p-6 lg:p-8">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-5">
+        <div className="min-w-0">
+          <div className="mb-5">
+            <h1 className="text-2xl font-semibold text-neutral-900">New outreach flow</h1>
+            <p className="text-sm text-neutral-500 mt-1">
+              Paste a job description. The flow is saved immediately after creation and can run alongside other jobs.
+            </p>
+          </div>
+          <div className="bg-white border border-neutral-200 rounded-xl p-5 space-y-3">
+            <label className="text-sm font-medium text-neutral-700">Job description</label>
+            <textarea
+              value={jobDescription}
+              onChange={(event) => setJobDescription(event.target.value)}
+              placeholder="Paste the full job posting here."
+              className="w-full h-80 p-3 text-sm border border-neutral-200 rounded-lg resize-none focus:outline-none focus:border-neutral-400"
+            />
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => onCreate(jobDescription)}
+                disabled={busy || !jobDescription.trim()}
+                className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-2"
+              >
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                Create flow
+              </button>
+            </div>
+          </div>
+        </div>
+        <EmailHistoryPanel
+          emails={extractedEmails}
+          sentApplications={sentApplications}
+          loading={sentApplicationsLoading}
+          error={sentApplicationsError}
+        />
       </div>
     </div>
   );
@@ -207,56 +343,68 @@ const DraftPanel = ({
   busyAction,
   credits,
   loadingLibrary,
+  sentApplications,
+  sentApplicationsLoading,
+  sentApplicationsError,
 }) => (
-  <div className="space-y-4">
-    <div>
-      <h2 className="text-sm font-semibold text-neutral-900">Job description</h2>
-      <p className="text-xs text-neutral-500 mt-1">Changes save automatically while this flow is still a draft.</p>
-    </div>
-    <textarea
-      value={jobDescriptionDraft}
-      onChange={(event) => setJobDescriptionDraft(event.target.value)}
-      className="w-full h-56 p-3 text-sm border border-neutral-200 rounded-lg resize-none focus:outline-none focus:border-neutral-400"
-    />
-
-    <div className="pt-2 border-t border-neutral-100">
-      <div className="mb-3">
-        <h2 className="text-sm font-semibold text-neutral-900">Choose the resume to send</h2>
-        <p className="text-xs text-neutral-500 mt-1">
-          Send the selected resume as-is or create a tailored child resume for this job.
-        </p>
+  <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-5">
+    <div className="space-y-4 min-w-0">
+      <div>
+        <h2 className="text-sm font-semibold text-neutral-900">Job description</h2>
+        <p className="text-xs text-neutral-500 mt-1">Changes save automatically while this flow is still a draft.</p>
       </div>
-      <ResumeLibraryPicker
-        groups={allGroups}
-        resumes={allResumes}
-        selectedResumeId={selectedBaseId}
-        onSelectResume={setSelectedBaseId}
-        loading={loadingLibrary}
-        jobDescription={jobDescriptionDraft || flow.jobDescription || ''}
+      <textarea
+        value={jobDescriptionDraft}
+        onChange={(event) => setJobDescriptionDraft(event.target.value)}
+        className="w-full h-56 p-3 text-sm border border-neutral-200 rounded-lg resize-none focus:outline-none focus:border-neutral-400"
       />
-    </div>
 
-    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-2 border-t border-neutral-100">
-      <button
-        type="button"
-        onClick={() => startFlow('existing')}
-        disabled={busyAction || !selectedBaseId}
-        className="h-10 px-4 border border-neutral-200 bg-white text-neutral-800 rounded-lg text-sm font-medium hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center justify-center gap-2"
-      >
-        {busyAction === 'existing' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
-        Use as-is & draft email
-      </button>
-      <button
-        type="button"
-        onClick={() => startFlow('tailored')}
-        disabled={busyAction || !selectedBaseId || credits < MIN_OUTREACH_TAILOR_CREDITS}
-        title={credits < MIN_OUTREACH_TAILOR_CREDITS ? 'Tailoring needs 1 credit' : undefined}
-        className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center justify-center gap-2"
-      >
-        {busyAction === 'tailored' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-        Tailor & draft email
-      </button>
+      <div className="pt-2 border-t border-neutral-100">
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold text-neutral-900">Choose the resume to send</h2>
+          <p className="text-xs text-neutral-500 mt-1">
+            Send the selected resume as-is or create a tailored child resume for this job.
+          </p>
+        </div>
+        <ResumeLibraryPicker
+          groups={allGroups}
+          resumes={allResumes}
+          selectedResumeId={selectedBaseId}
+          onSelectResume={setSelectedBaseId}
+          loading={loadingLibrary}
+          jobDescription={jobDescriptionDraft || flow.jobDescription || ''}
+        />
+      </div>
+
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-2 border-t border-neutral-100">
+        <button
+          type="button"
+          onClick={() => startFlow('existing')}
+          disabled={busyAction || !selectedBaseId}
+          className="h-10 px-4 border border-neutral-200 bg-white text-neutral-800 rounded-lg text-sm font-medium hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center justify-center gap-2"
+        >
+          {busyAction === 'existing' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+          Use as-is & draft email
+        </button>
+        <button
+          type="button"
+          onClick={() => startFlow('tailored')}
+          disabled={busyAction || !selectedBaseId || credits < MIN_OUTREACH_TAILOR_CREDITS}
+          title={credits < MIN_OUTREACH_TAILOR_CREDITS ? 'Tailoring needs 1 credit' : undefined}
+          className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center justify-center gap-2"
+        >
+          {busyAction === 'tailored' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+          Tailor & draft email
+        </button>
+      </div>
     </div>
+    <EmailHistoryPanel
+      emails={extractEmailsFromText(jobDescriptionDraft || flow.jobDescription || '')}
+      sentApplications={sentApplications}
+      loading={sentApplicationsLoading}
+      error={sentApplicationsError}
+      embedded={true}
+    />
   </div>
 );
 
@@ -560,6 +708,9 @@ const FlowDetail = ({
   startFlow,
   busyAction,
   credits,
+  sentApplications,
+  sentApplicationsLoading,
+  sentApplicationsError,
   emailDraft,
   setEmailDraft,
   markEmailDirty,
@@ -584,7 +735,7 @@ const FlowDetail = ({
   }
 
   return (
-    <div className="max-w-5xl mx-auto p-6 lg:p-8">
+    <div className="max-w-7xl mx-auto p-6 lg:p-8">
       <div className="mb-5 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-1">
@@ -626,6 +777,9 @@ const FlowDetail = ({
             busyAction={busyAction}
             credits={credits}
             loadingLibrary={loadingLibrary}
+            sentApplications={sentApplications}
+            sentApplicationsLoading={sentApplicationsLoading}
+            sentApplicationsError={sentApplicationsError}
           />
         )}
 
@@ -708,6 +862,9 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
 
   const [allResumes, setAllResumes] = useState([]);
   const [allGroups, setAllGroups] = useState([]);
+  const [sentApplications, setSentApplications] = useState([]);
+  const [sentApplicationsLoading, setSentApplicationsLoading] = useState(false);
+  const [sentApplicationsError, setSentApplicationsError] = useState('');
   const [templates, setTemplates] = useState([]);
   const [settings, setSettings] = useState(null);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
@@ -760,6 +917,24 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
       })
       .catch((err) => setError(err.message || 'Failed to load resume library.'))
       .finally(() => { if (alive) setLoadingLibrary(false); });
+    return () => { alive = false; };
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid) return undefined;
+    let alive = true;
+    setSentApplicationsLoading(true);
+    setSentApplicationsError('');
+    getSentApplications(user.uid, 1000)
+      .then((items) => {
+        if (alive) setSentApplications(items);
+      })
+      .catch((err) => {
+        if (alive) setSentApplicationsError(err.message || 'Failed to load previous sent emails.');
+      })
+      .finally(() => {
+        if (alive) setSentApplicationsLoading(false);
+      });
     return () => { alive = false; };
   }, [user?.uid]);
 
@@ -1065,7 +1240,13 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
         )}
         <div className="flex-1 overflow-y-auto">
           {showNew ? (
-            <NewFlowForm onCreate={handleCreate} busy={creating} />
+            <NewFlowForm
+              onCreate={handleCreate}
+              busy={creating}
+              sentApplications={sentApplications}
+              sentApplicationsLoading={sentApplicationsLoading}
+              sentApplicationsError={sentApplicationsError}
+            />
           ) : (
             <FlowDetail
               user={user}
@@ -1084,6 +1265,9 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
               startFlow={startFlow}
               busyAction={busyAction}
               credits={credits}
+              sentApplications={sentApplications}
+              sentApplicationsLoading={sentApplicationsLoading}
+              sentApplicationsError={sentApplicationsError}
               emailDraft={emailDraft}
               setEmailDraft={setEmailDraft}
               markEmailDirty={() => setEmailDirty(true)}
