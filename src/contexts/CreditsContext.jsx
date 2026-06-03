@@ -3,6 +3,7 @@ import { doc, onSnapshot, collection, query, orderBy, limit } from 'firebase/fir
 import { db, functions, httpsCallable } from '../lib/firebase';
 import { useAuth } from './AuthContext';
 import { analyticsService } from '../services/analyticsService';
+import { PURCHASABLE_CREDIT_PLANS, getCreditPlan } from '../config/creditPlans';
 
 const CreditsContext = createContext(null);
 
@@ -72,16 +73,16 @@ export const CreditsProvider = ({ children }) => {
     return () => unsubscribe();
   }, [isAuthenticated, user?.uid]);
 
-  // Check if user can purchase (credits < 5)
-  const canPurchase = credits < 5;
+  const canPurchase = true;
 
   // Check if user has enough credits for AI call
   const hasCredits = credits >= 1;
 
   // Initiate Stripe checkout
-  const purchaseCredits = async () => {
-    if (!canPurchase) {
-      setError('You can only purchase credits when you have less than 5 remaining.');
+  const purchaseCredits = async (planId) => {
+    const plan = getCreditPlan(planId);
+    if (!plan?.checkoutEnabled) {
+      setError('Select a valid credit plan.');
       return null;
     }
 
@@ -89,11 +90,11 @@ export const CreditsProvider = ({ children }) => {
     setError(null);
     
     // Track purchase initiation
-    analyticsService.trackCreditsPurchaseInitiated(5, 9.99);
+    analyticsService.trackCreditsPurchaseInitiated(plan.credits, plan.price);
 
     try {
       const createCheckoutSession = httpsCallable(functions, 'createCheckoutSession');
-      const result = await createCheckoutSession();
+      const result = await createCheckoutSession({ planId: plan.id });
       
       // Redirect to Stripe checkout
       if (result.data?.url) {
@@ -118,6 +119,7 @@ export const CreditsProvider = ({ children }) => {
     canPurchase,
     hasCredits,
     purchaseCredits,
+    creditPlans: PURCHASABLE_CREDIT_PLANS,
     purchaseLoading,
     error,
     clearError: () => setError(null),

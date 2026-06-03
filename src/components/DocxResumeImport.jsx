@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Upload, Loader2 } from 'lucide-react';
 import { parseDocxToFieldMap } from '../services/documentParser';
+import { useCredits } from '../contexts/CreditsContext';
 
 /**
  * DocxResumeImport
@@ -10,12 +11,18 @@ import { parseDocxToFieldMap } from '../services/documentParser';
  * via onImport(blob, fieldMap).
  */
 const DocxResumeImport = ({ onImport, disabled }) => {
+  const { credits } = useCredits();
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState('');
 
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (credits < 1) {
+      setError('Parsing a DOCX resume uses 1 credit. Add credits to continue.');
+      e.target.value = '';
+      return;
+    }
     const fileName = file.name.toLowerCase();
     if (!fileName.endsWith('.docx')) {
       setError('Only .docx files are supported. Please save your resume as DOCX and try again.');

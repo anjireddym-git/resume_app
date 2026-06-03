@@ -8,7 +8,7 @@ import { analyticsService } from '../services/analyticsService';
 import { PREDEFINED_ROLES } from '../config/predefinedRoles';
 
 const AGENT_FIELDS = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'];
-const AUTO_POPULATE_AGENT_CREDITS_PER_RESUME = 5;
+const AUTO_POPULATE_AGENT_CREDITS_PER_RESUME = 1;
 
 const AutoPopulateModal = ({ isOpen, onClose, group, onComplete }) => {
   const { user } = useAuth();

@@ -46,7 +46,7 @@ const TransactionHistory = ({ isOpen, onClose }) => {
         <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-200">
           <div className="flex items-center gap-2">
             <Receipt className="w-5 h-5 text-neutral-600" />
-            <h2 className="text-lg font-semibold text-neutral-900">Purchase History</h2>
+            <h2 className="text-lg font-semibold text-neutral-900">Credit History</h2>
           </div>
           <button
             onClick={onClose}
@@ -63,9 +63,9 @@ const TransactionHistory = ({ isOpen, onClose }) => {
               <div className="w-16 h-16 bg-neutral-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <Coins className="w-8 h-8 text-neutral-400" />
               </div>
-              <h3 className="text-lg font-medium text-neutral-900 mb-2">No purchases yet</h3>
+              <h3 className="text-lg font-medium text-neutral-900 mb-2">No credit activity yet</h3>
               <p className="text-sm text-neutral-500">
-                Your purchase history will appear here
+                Signup grants and purchases will appear here
               </p>
             </div>
           ) : (
@@ -86,6 +86,9 @@ const TransactionHistory = ({ isOpen, onClose }) => {
                           {tx.status}
                         </span>
                       </div>
+                      <p className="text-xs text-neutral-600 mt-0.5">
+                        {tx.planName || (tx.type === 'grant' ? 'Free signup credits' : 'Credit purchase')}
+                      </p>
                       <p className="text-xs text-neutral-500 mt-0.5">
                         {formatDate(tx.createdAt)}
                       </p>
@@ -93,7 +96,7 @@ const TransactionHistory = ({ isOpen, onClose }) => {
                   </div>
                   <div className="text-right">
                     <span className="font-semibold text-neutral-900">
-                      ${tx.dollarAmount?.toFixed(2) || '2.00'}
+                      {tx.dollarAmount ? `$${tx.dollarAmount.toFixed(2)}` : 'Free'}
                     </span>
                   </div>
                 </div>
@@ -105,7 +108,7 @@ const TransactionHistory = ({ isOpen, onClose }) => {
         {/* Footer */}
         <div className="px-6 py-4 border-t border-neutral-200 bg-neutral-50 rounded-b-xl">
           <p className="text-xs text-neutral-500 text-center">
-            Each credit equals one AI operation. Purchases are non-refundable.
+            Credits are used for resume generation and AI imports. Purchases are non-refundable.
           </p>
         </div>
       </div>

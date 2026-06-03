@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useRef } from 'react';
 import { X, Upload, Loader2, FileText, ArrowLeft, ArrowRight, Check } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useCredits } from '../contexts/CreditsContext';
 import { createResumeGroup, createResume } from '../services/resumeService';
 import { extractResumeFromFile } from '../services/documentParser';
 import { geminiService } from '../services/geminiService';
@@ -12,6 +13,7 @@ import { normalizeSummaryToPoints } from '../lib/summaryUtils';
 
 const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
   const { user } = useAuth();
+  const { credits } = useCredits();
   const [step, setStep] = useState('name'); // 'name' | 'resume' | 'design' | 'creating'
   const [isLoading, setIsLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -26,6 +28,11 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (credits < 1) {
+      setError('Importing a resume uses 1 credit. Add credits to continue.');
+      e.target.value = '';
+      return;
+    }
 
     setIsImporting(true);
     setError('');

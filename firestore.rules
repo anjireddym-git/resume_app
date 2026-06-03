@@ -12,17 +12,28 @@ service cloud.firestore {
     function isOwner(userId) {
       return request.auth.uid == userId;
     }
+
+    function serverOwnedUserFields() {
+      return [
+        'credits',
+        'creditPlan',
+        'signupCreditGrantedAt',
+        'signupCreditGrantPlanId',
+        'billing',
+        'stripeCustomerId'
+      ];
+    }
     
     // Users collection - users can read their own data, but credits can only be modified by Cloud Functions (admin SDK)
     match /users/{userId} {
       // Allow read for own document
       allow read: if isAuthenticated() && isOwner(userId);
       
-      // Allow create/update but protect credits field from client writes
+      // Allow create/update but protect billing fields from client writes
       allow create: if isAuthenticated() && isOwner(userId) && 
-        !('credits' in request.resource.data);
+        !request.resource.data.keys().hasAny(serverOwnedUserFields());
       allow update: if isAuthenticated() && isOwner(userId) && 
-        (!('credits' in request.resource.data) || request.resource.data.credits == resource.data.credits);
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(serverOwnedUserFields());
       
       // Transactions subcollection - read only for users, Cloud Functions write
       match /transactions/{transactionId} {

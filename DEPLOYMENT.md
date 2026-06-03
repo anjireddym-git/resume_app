@@ -168,6 +168,10 @@ GEMINI_MODEL_NAME=gemini-3.1-pro-preview
 MODEL_NAME=
 
 # Optional per-operation overrides. Leave blank to use the selected provider's default model.
+MODEL_ANALYZE_MATCH=gpt-5.4-nano
+MODEL_GENERATE_SUGGESTIONS=gpt-5.4-nano
+MODEL_GENERATE_REFACTORED_HIGHLIGHTS=gpt-5.4-nano
+MODEL_EDIT_FIELD=gpt-5.4-nano
 MODEL_GENERATE_RECRUITER_EMAIL=
 MODEL_DRAFT_FOLLOW_UP_EMAIL=
 MODEL_CLASSIFY_REPLY_SENTIMENT=
@@ -370,10 +374,19 @@ Optional per-operation overrides can route lightweight work to a smaller model w
 
 Example:
 ```env
+MODEL_ANALYZE_MATCH=gpt-5.4-nano
+MODEL_GENERATE_SUGGESTIONS=gpt-5.4-nano
+MODEL_GENERATE_REFACTORED_HIGHLIGHTS=gpt-5.4-nano
+MODEL_EDIT_FIELD=gpt-5.4-nano
 MODEL_GENERATE_RECRUITER_EMAIL=gpt-5.4-nano
 MODEL_DRAFT_FOLLOW_UP_EMAIL=gpt-5.4-nano
 MODEL_CLASSIFY_REPLY_SENTIMENT=gpt-5.4-nano
 ```
+
+Resume generation and AI imports each cost 1 credit. Lightweight actions such
+as match analysis, suggestions, inline edits, recruiter emails, follow-ups, and
+reply sentiment classification are free credit-wise and should use nano-class
+models when `LLM_PROVIDER=openai`.
 
 After editing `functions/.env`:
 ```bash

@@ -1,14 +1,21 @@
 import React, { useState } from 'react';
 import { Upload, FileText, Loader2 } from 'lucide-react';
 import { extractResumeFromFile } from '../services/documentParser';
+import { useCredits } from '../contexts/CreditsContext';
 
 const ResumeImport = ({ onImport, geminiService, disabled }) => {
+  const { credits } = useCredits();
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState('');
 
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (credits < 1) {
+      setError('Importing a resume uses 1 credit. Add credits to continue.');
+      e.target.value = '';
+      return;
+    }
 
     // Validate file type - PDF and DOCX supported
     const fileName = file.name.toLowerCase();

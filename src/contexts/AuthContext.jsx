@@ -128,11 +128,16 @@ export const AuthProvider = ({ children }) => {
 
         const userRef = doc(db, 'users', firebaseUser.uid);
         const userSnap = await getDoc(userRef);
+        const existingData = userSnap.exists() ? userSnap.data() : {};
         const initialPreferences = {
           currentGroupId: null,
           currentResumeId: null,
           driveSyncEnabled: false,
           themeMode: 'system',
+        };
+        const nextPreferences = {
+          ...initialPreferences,
+          ...(existingData.preferences || {}),
         };
         const userData = {
           uid: firebaseUser.uid,
@@ -147,14 +152,14 @@ export const AuthProvider = ({ children }) => {
             ...userData,
             createdAt: serverTimestamp(),
             preferences: initialPreferences,
-          });
+          }, { merge: true });
         } else {
-          await setDoc(userRef, userData, { merge: true });
+          await setDoc(userRef, { ...userData, preferences: nextPreferences }, { merge: true });
         }
 
         setUser({
           ...userData,
-          preferences: userSnap.exists() ? userSnap.data().preferences : initialPreferences,
+          preferences: userSnap.exists() ? nextPreferences : initialPreferences,
         });
 
         setGoogleToken(null);

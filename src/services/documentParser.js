@@ -67,7 +67,7 @@ export async function extractResumeFromFile(geminiService, file) {
   } catch (error) {
     console.error('Error extracting resume data:', error);
     if (error.code === 'functions/resource-exhausted') {
-      throw new Error('Insufficient credits. Please purchase more credits to import resumes.');
+      throw new Error('Importing a resume uses 1 credit. Add credits to continue.');
     }
     throw new Error('Failed to extract resume data: ' + error.message);
   }
@@ -109,12 +109,19 @@ export async function parseDocxToFieldMap(file) {
   }
   const base64Data = await fileToBase64(file);
   const callAI = httpsCallable(functions, 'callAI');
-  const result = await callAI({
-    action: 'parseDocxToFieldMap',
-    data: { base64Data },
-  });
-  if (!result.data?.success) {
-    throw new Error(result.data?.error || 'Failed to parse DOCX');
+  try {
+    const result = await callAI({
+      action: 'parseDocxToFieldMap',
+      data: { base64Data },
+    });
+    if (!result.data?.success) {
+      throw new Error(result.data?.error || 'Failed to parse DOCX');
+    }
+    return result.data.data;
+  } catch (error) {
+    if (error.code === 'functions/resource-exhausted') {
+      throw new Error('Parsing a DOCX resume uses 1 credit. Add credits to continue.');
+    }
+    throw error;
   }
-  return result.data.data;
 }

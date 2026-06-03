@@ -29,8 +29,7 @@ import { buildOutreachDocxRenderOptions, sanitizeOutreachFilename } from './outr
 import ResumeLibraryPicker from './ResumeLibraryPicker';
 
 const AGENT_FIELDS = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'];
-const MIN_OUTREACH_USE_AS_IS_CREDITS = 1;
-const MIN_OUTREACH_TAILOR_CREDITS = 7;
+const MIN_OUTREACH_TAILOR_CREDITS = 1;
 const STEPS = ['jd', 'pickBase', 'tailor', 'email', 'send', 'done'];
 const STEP_LABEL = {
   jd: 'Job description',
@@ -99,7 +98,7 @@ const reduceAgentStreamChunk = (state, chunk) => {
 
 const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
   const { ensureGmailAccess, hasGmailSendScope } = useAuth();
-  const { credits, hasCredits } = useCredits();
+  const { credits } = useCredits();
 
   const [step, setStep] = useState('jd');
   const [error, setError] = useState('');
@@ -169,10 +168,6 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
 
   const handleSubmitJD = async () => {
     if (!jobDescription.trim()) { setError('Paste a job description to continue.'); return; }
-    if (!hasCredits || credits < MIN_OUTREACH_USE_AS_IS_CREDITS) {
-      setError('You need at least 1 credit to draft the outreach email.');
-      return;
-    }
     setError(''); setBusy(true); setStep('pickBase'); setLoadingResumes(true);
     try {
       const [resumes, groups] = await Promise.all([
@@ -219,8 +214,8 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
 
   const handleConfirmBase = async () => {
     if (!selectedBaseId) { setError('Pick a base resume to continue.'); return; }
-    if (!hasCredits || credits < MIN_OUTREACH_TAILOR_CREDITS) {
-      setError(`Tailoring needs at least ${MIN_OUTREACH_TAILOR_CREDITS} credits. Use the selected resume as-is or add credits.`);
+    if (credits < MIN_OUTREACH_TAILOR_CREDITS) {
+      setError('Tailoring needs 1 credit. Use the selected resume as-is or add credits.');
       return;
     }
     setError(''); setBusy(true); setStep('tailor');
@@ -322,7 +317,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
       if ((settings?.defaultCc?.length || 0) + (settings?.defaultBcc?.length || 0) > 0) {
         setShowCcBcc(true);
       }
-      analyticsService.trackCreditsUsed('tailor_and_send_email_draft', 1);
+      analyticsService.trackCreditsUsed('tailor_and_send_email_draft', 0);
     } catch (err) {
       console.error(err); setError(err.message || 'Failed to draft recruiter email.');
     } finally { setBusy(false); }
@@ -497,7 +492,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
               />
               <div className="flex items-center justify-between">
                 <p className="text-xs text-neutral-500">
-                  Use an existing resume with a draft email from {MIN_OUTREACH_USE_AS_IS_CREDITS} credit, or tailor a new child resume when you have at least {MIN_OUTREACH_TAILOR_CREDITS} credits.
+                  Draft an email with an existing resume for free, or use 1 credit to tailor a new child resume first.
                 </p>
                 <button
                   onClick={handleSubmitJD}
@@ -550,7 +545,7 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
                       <button
                         onClick={handleConfirmBase}
                         disabled={busy || !selectedBaseId || credits < MIN_OUTREACH_TAILOR_CREDITS}
-                        title={credits < MIN_OUTREACH_TAILOR_CREDITS ? `Tailoring needs at least ${MIN_OUTREACH_TAILOR_CREDITS} credits` : undefined}
+                        title={credits < MIN_OUTREACH_TAILOR_CREDITS ? 'Tailoring needs 1 credit' : undefined}
                         className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
                       >
                         {busy && resumeSelectionMode === 'tailored' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}

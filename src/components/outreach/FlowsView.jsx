@@ -50,8 +50,7 @@ import GeneratedDocxPreview from '../GeneratedDocxPreview';
 import ResumeLibraryPicker from './ResumeLibraryPicker';
 import { buildOutreachDocxRenderOptions, sanitizeOutreachFilename } from './outreachDocxOptions';
 
-const MIN_OUTREACH_USE_AS_IS_CREDITS = 1;
-const MIN_OUTREACH_TAILOR_CREDITS = 7;
+const MIN_OUTREACH_TAILOR_CREDITS = 1;
 
 const emptyEmailDraft = {
   to: '',
@@ -241,7 +240,7 @@ const DraftPanel = ({
       <button
         type="button"
         onClick={() => startFlow('existing')}
-        disabled={busyAction || !selectedBaseId || credits < MIN_OUTREACH_USE_AS_IS_CREDITS}
+        disabled={busyAction || !selectedBaseId}
         className="h-10 px-4 border border-neutral-200 bg-white text-neutral-800 rounded-lg text-sm font-medium hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center justify-center gap-2"
       >
         {busyAction === 'existing' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
@@ -251,7 +250,7 @@ const DraftPanel = ({
         type="button"
         onClick={() => startFlow('tailored')}
         disabled={busyAction || !selectedBaseId || credits < MIN_OUTREACH_TAILOR_CREDITS}
-        title={credits < MIN_OUTREACH_TAILOR_CREDITS ? `Tailoring needs at least ${MIN_OUTREACH_TAILOR_CREDITS} credits` : undefined}
+        title={credits < MIN_OUTREACH_TAILOR_CREDITS ? 'Tailoring needs 1 credit' : undefined}
         className="h-10 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center justify-center gap-2"
       >
         {busyAction === 'tailored' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}

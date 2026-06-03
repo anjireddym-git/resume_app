@@ -146,7 +146,7 @@ function App() {
     hasGoogleDriveAccess,
     driveSyncEnabled,
   } = useAuth();
-  const { credits, hasCredits, purchaseCredits } = useCredits();
+  const { hasCredits } = useCredits();
   const { themeMode, resolvedTheme, setThemeMode } = useThemeMode(user?.preferences?.themeMode);
   
   const [showCreateGroup, setShowCreateGroup] = useState(false);
@@ -423,13 +423,6 @@ function App() {
     const jobDesc = jd || jobDescription;
     if (!jobDesc.trim() || !currentResume) return;
     
-    // Check credits before AI action
-    if (!hasCredits) {
-      setError('No credits remaining. Please purchase credits to use AI features.');
-      analyticsService.trackLowCreditsWarning(0);
-      return;
-    }
-    
     setIsAnalyzing(true);
     setError('');
     try {
@@ -459,7 +452,7 @@ function App() {
     if (!hasCredits) {
       console.log('[AI Update] No credits available');
       setShowJobModal(false);
-      setError('No credits remaining. Please purchase credits to use AI features.');
+      setError('Resume generation uses 1 credit. Add credits to continue.');
       analyticsService.trackLowCreditsWarning(0);
       return;
     }
@@ -1273,9 +1266,9 @@ function App() {
                   <div className="flex items-center gap-2 md:gap-2.5 flex-wrap">
                     <button
                       onClick={() => setShowJobModal(true)}
-                      disabled={!apiKeySet || isLoading || !hasCredits}
+                      disabled={!apiKeySet || isLoading}
                       className="h-9 px-3 md:px-4 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 disabled:opacity-50 flex items-center gap-2"
-                      title={!hasCredits ? 'No credits - purchase credits to continue' : 'Optimize resume for job'}
+                      title="Optimize resume for job"
                     >
                       <Sparkles className="w-4 h-4" />
                       <span className="hidden sm:inline">Optimize</span>

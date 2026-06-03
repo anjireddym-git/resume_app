@@ -4,10 +4,21 @@ const { onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onMessagePublished } = require('firebase-functions/v2/pubsub');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { defineSecret, defineString } = require('firebase-functions/params');
+const functionsV1 = require('firebase-functions/v1');
 const admin = require('firebase-admin');
 const Stripe = require('stripe');
 const { GoogleGenAI } = require('@google/genai');
 const OpenAI = require('openai');
+const {
+  NANO_MODEL,
+  RESUME_GENERATION_CREDIT_COST,
+  SIGNUP_CREDIT_PLAN_ID,
+  getAiActionCreditCost,
+  getCreditPlan,
+  getOutreachFlowCreditCost,
+  shouldApplyCheckoutCompletion,
+  shouldGrantSignupCredits,
+} = require('./creditConfig');
 const {
   CONTRACT_DENSITY,
   getExperienceBulletRange,
@@ -49,28 +60,25 @@ const openaiModelName = defineString('OPENAI_MODEL_NAME', { default: 'gpt-5.5' }
 const geminiModelName = defineString('GEMINI_MODEL_NAME', { default: 'gemini-3.1-pro-preview' });
 const operationModelOverrides = Object.freeze({
   updateResumeForJob: defineString('MODEL_UPDATE_RESUME_FOR_JOB', { default: '' }),
-  analyzeMatch: defineString('MODEL_ANALYZE_MATCH', { default: '' }),
-  generateSuggestions: defineString('MODEL_GENERATE_SUGGESTIONS', { default: '' }),
-  generateRefactoredHighlights: defineString('MODEL_GENERATE_REFACTORED_HIGHLIGHTS', { default: '' }),
+  analyzeMatch: defineString('MODEL_ANALYZE_MATCH', { default: NANO_MODEL }),
+  generateSuggestions: defineString('MODEL_GENERATE_SUGGESTIONS', { default: NANO_MODEL }),
+  generateRefactoredHighlights: defineString('MODEL_GENERATE_REFACTORED_HIGHLIGHTS', { default: NANO_MODEL }),
   transformResumeForRole: defineString('MODEL_TRANSFORM_RESUME_FOR_ROLE', { default: '' }),
   extractResumeFromFile: defineString('MODEL_EXTRACT_RESUME_FROM_FILE', { default: '' }),
   parseDocxToFieldMap: defineString('MODEL_PARSE_DOCX_TO_FIELD_MAP', { default: '' }),
-  editField: defineString('MODEL_EDIT_FIELD', { default: '' }),
-  generateRecruiterEmail: defineString('MODEL_GENERATE_RECRUITER_EMAIL', { default: '' }),
-  draftFollowUpEmail: defineString('MODEL_DRAFT_FOLLOW_UP_EMAIL', { default: '' }),
-  classifyReplySentiment: defineString('MODEL_CLASSIFY_REPLY_SENTIMENT', { default: '' }),
+  editField: defineString('MODEL_EDIT_FIELD', { default: NANO_MODEL }),
+  generateRecruiterEmail: defineString('MODEL_GENERATE_RECRUITER_EMAIL', { default: NANO_MODEL }),
+  draftFollowUpEmail: defineString('MODEL_DRAFT_FOLLOW_UP_EMAIL', { default: NANO_MODEL }),
+  classifyReplySentiment: defineString('MODEL_CLASSIFY_REPLY_SENTIMENT', { default: NANO_MODEL }),
   runResumeAgentStreaming: defineString('MODEL_RUN_RESUME_AGENT_STREAMING', { default: '' }),
 });
 // Optional legacy agent-specific overrides. They are only honored when they
 // match the selected LLM_PROVIDER, so switching providers cannot mix vendors.
 const thinkingModelName = defineString('THINKING_MODEL_NAME', { default: '' });
-const agentRunCreditCost = defineString('AGENT_RUN_CREDIT_COST', { default: '5' });
 const openaiThinkingModel = defineString('OPENAI_THINKING_MODEL', { default: '' });
 const openaiReasoningEffort = defineString('OPENAI_REASONING_EFFORT', { default: 'medium' });
 
 // Stripe config
-const CREDITS_PER_PURCHASE = 50;
-const PRICE_AMOUNT = 500; // $5.00 in cents
 const STRIPE_PRODUCT_ID = 'prod_UXfqMUL4G8rS8I';
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.1-pro-preview';
@@ -130,6 +138,44 @@ function createAiClient(provider) {
     : new GoogleGenAI({ apiKey: geminiApiKey.value().trim() });
 }
 
+async function deductCreditsOrThrow(userRef, cost, label = 'operation') {
+  const creditCost = Math.max(0, Number(cost || 0));
+  if (creditCost <= 0) {
+    const snap = await userRef.get();
+    if (!snap.exists) throw new HttpsError('not-found', 'User not found');
+    return { before: Number(snap.data().credits || 0), after: Number(snap.data().credits || 0), cost: 0 };
+  }
+
+  let before = 0;
+  await db.runTransaction(async (transaction) => {
+    const userSnap = await transaction.get(userRef);
+    if (!userSnap.exists) throw new HttpsError('not-found', 'User not found');
+    before = Number(userSnap.data().credits || 0);
+    if (before < creditCost) {
+      throw new HttpsError(
+        'resource-exhausted',
+        `Insufficient credits. This ${label} costs ${creditCost} credit${creditCost === 1 ? '' : 's'}, you have ${before}.`
+      );
+    }
+    transaction.update(userRef, {
+      credits: admin.firestore.FieldValue.increment(-creditCost),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+
+  return { before, after: before - creditCost, cost: creditCost };
+}
+
+async function refundCredits(userRef, cost, reason) {
+  const creditCost = Math.max(0, Number(cost || 0));
+  if (creditCost <= 0) return;
+  await userRef.update({
+    credits: admin.firestore.FieldValue.increment(creditCost),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  console.warn(`[credits] refunded ${creditCost} credit${creditCost === 1 ? '' : 's'}: ${reason}`);
+}
+
 function supportsOpenAIReasoning(model) {
   return /^(gpt-5|o\d)/i.test(String(model || '').trim());
 }
@@ -141,12 +187,85 @@ function getOpenAIReasoningConfig(model) {
 }
 
 // ============================================================================
+// Account / Credit Bootstrap
+// ============================================================================
+
+exports.grantSignupCredits = functionsV1.auth.user().onCreate(async (firebaseUser) => {
+  const plan = getCreditPlan(SIGNUP_CREDIT_PLAN_ID);
+  if (!plan) {
+    console.error('[signup-credits] free plan is not configured');
+    return;
+  }
+
+  const userRef = db.collection('users').doc(firebaseUser.uid);
+  const transactionRef = userRef.collection('transactions').doc('signup_free_credits');
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  let granted = false;
+
+  await db.runTransaction(async (transaction) => {
+    const userSnap = await transaction.get(userRef);
+    const userData = userSnap.exists ? userSnap.data() : null;
+    if (!shouldGrantSignupCredits(userData)) return;
+
+    const profile = {
+      uid: firebaseUser.uid,
+      email: firebaseUser.email || '',
+      displayName: firebaseUser.displayName || '',
+      photoURL: firebaseUser.photoURL || '',
+      credits: plan.credits,
+      creditPlan: {
+        id: plan.id,
+        name: plan.name,
+        source: 'signup',
+      },
+      signupCreditGrantedAt: now,
+      signupCreditGrantPlanId: plan.id,
+      updatedAt: now,
+    };
+
+    if (userSnap.exists) {
+      transaction.set(userRef, profile, { merge: true });
+    } else {
+      transaction.set(userRef, {
+        ...profile,
+        createdAt: now,
+        preferences: {
+          currentGroupId: null,
+          currentResumeId: null,
+          driveSyncEnabled: false,
+          themeMode: 'system',
+        },
+      });
+    }
+
+    transaction.set(transactionRef, {
+      type: 'grant',
+      source: 'signup',
+      planId: plan.id,
+      planName: plan.name,
+      amount: plan.credits,
+      dollarAmount: 0,
+      status: 'completed',
+      description: 'Free signup credits',
+      createdAt: now,
+      completedAt: now,
+    }, { merge: true });
+    granted = true;
+  });
+
+  if (granted) {
+    console.log(`[signup-credits] granted ${plan.credits} credits to ${firebaseUser.uid}`);
+  }
+});
+
+// ============================================================================
 // AI Cloud Functions
 // ============================================================================
 
 /**
  * Main AI function - handles all AI operations
- * Checks credits, deducts on success, and calls appropriate AI method (Gemini or OpenAI)
+ * Pre-deducts credits for paid actions, refunds on failure, and skips credit
+ * checks for free lightweight actions.
  */
 exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds: 300 }, async (request) => {
   // Verify authentication
@@ -155,27 +274,20 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
   }
 
   const userId = request.auth.uid;
-  const { action, data } = request.data;
+  const { action, data = {} } = request.data || {};
+  const cost = getAiActionCreditCost(action);
+  if (cost === null) {
+    throw new HttpsError('invalid-argument', `Unknown action: ${action}`);
+  }
 
-  // Get user document and check credits
   const userRef = db.collection('users').doc(userId);
-  const userDoc = await userRef.get();
-  
-  if (!userDoc.exists) {
-    throw new HttpsError('not-found', 'User not found');
-  }
-
-  const userData = userDoc.data();
-  const currentCredits = userData.credits || 0;
-
-  if (currentCredits < 1) {
-    throw new HttpsError('resource-exhausted', 'Insufficient credits. Please purchase more credits to continue.');
-  }
+  const creditState = await deductCreditsOrThrow(userRef, cost, 'AI operation');
+  let shouldRefund = cost > 0;
 
   const provider = getConfiguredProvider();
   const model = getConfiguredModel(provider, { action });
   const aiClient = createAiClient(provider);
-  console.log(`[callAI] action=${action} provider=${provider} model=${model}`);
+  console.log(`[callAI] action=${action} cost=${cost} provider=${provider} model=${model}`);
 
   try {
     let result;
@@ -214,18 +326,23 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
       case 'classifyReplySentiment':
         result = await classifyReplySentiment(aiClient, model, provider, data.snippet, data.fromAddress);
         break;
-      default:
-        throw new HttpsError('invalid-argument', `Unknown action: ${action}`);
     }
 
-    // Deduct 1 credit on success
-    await userRef.update({
-      credits: admin.firestore.FieldValue.increment(-1)
-    });
-
-    return { success: true, data: result, creditsRemaining: currentCredits - 1 };
+    shouldRefund = false;
+    return {
+      success: true,
+      data: result,
+      creditCost: cost,
+      creditsRemaining: creditState.after,
+    };
   } catch (error) {
     console.error('AI call error:', error);
+    if (shouldRefund) {
+      await refundCredits(userRef, cost, `callAI_${action}_failed`).catch((refundError) => {
+        console.error('[credits] failed to refund callAI credits:', refundError);
+      });
+    }
+    if (error instanceof HttpsError) throw error;
     throw new HttpsError('internal', error.message || 'AI processing failed');
   }
 });
@@ -1652,12 +1769,11 @@ function outreachFollowUpIntervalMs(followUp) {
 }
 
 function getAgentRunCostServer() {
-  return Math.max(1, parseInt(agentRunCreditCost.value(), 10) || 5);
+  return RESUME_GENERATION_CREDIT_COST;
 }
 
 function getOutreachFlowCost(flow = {}) {
-  if (flow.mode === 'existing' || flow.resultResumeId) return 1;
-  return getAgentRunCostServer() + 1;
+  return getOutreachFlowCreditCost(flow);
 }
 
 function buildFullResumeServer(group = {}, resume = {}) {
@@ -2078,13 +2194,16 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
       }
 
       const nextStatus = flow.mode === 'existing' || flow.resultResumeId ? 'drafting_email' : 'tailoring';
-      transaction.update(userRef, {
-        credits: admin.firestore.FieldValue.increment(-cost),
-      });
+      if (cost > 0) {
+        transaction.update(userRef, {
+          credits: admin.firestore.FieldValue.increment(-cost),
+          updatedAt: serverTimestamp(),
+        });
+      }
       transaction.update(flowRef, sanitizeFirestoreValue({
         status: nextStatus,
         creditCost: cost,
-        creditsCharged: true,
+        creditsCharged: cost > 0,
         workerLease: {
           token: leaseToken,
           startedAt: serverTimestamp(),
@@ -2176,7 +2295,7 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
         }
 
         if (!validator.ok) {
-          await refundOutreachCredits(userId, 1, 'email_not_drafted_after_review_required', flowRef);
+          await refundOutreachCredits(userId, cost, 'tailored_resume_not_persisted_after_review_required', flowRef);
           await updateOutreachFlowProgress(flowRef, {
             status: 'review_required',
             isActive: true,
@@ -2270,7 +2389,7 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
       }, { type: 'ready_to_send', message: 'Email draft is ready to review.', data: { resultResumeId } });
     } catch (err) {
       const isCanceled = err?.code === 'outreach/canceled';
-      const refundAmount = isCanceled ? cost : (tailoringCompleted ? 1 : cost);
+      const refundAmount = isCanceled ? cost : (tailoringCompleted ? 0 : cost);
       await refundOutreachCredits(userId, refundAmount, isCanceled ? 'flow_canceled' : 'flow_failed', flowRef).catch((refundErr) => {
         console.error('[outreach.flow] refund failed:', refundErr);
       });
@@ -2855,48 +2974,54 @@ exports.createCheckoutSession = onCall({ secrets: [stripeSecretKey] }, async (re
   }
 
   const userId = request.auth.uid;
-  
-  // Check if user can purchase (credits < 5)
-  const userRef = db.collection('users').doc(userId);
-  const userDoc = await userRef.get();
-  const currentCredits = userDoc.exists ? (userDoc.data().credits || 0) : 0;
-
-  if (currentCredits >= 5) {
-    throw new HttpsError('failed-precondition', 'You can only purchase credits when you have less than 5 remaining.');
+  const planId = String(request.data?.planId || '').trim();
+  const plan = getCreditPlan(planId);
+  if (!plan || !plan.checkoutEnabled) {
+    throw new HttpsError('invalid-argument', 'Select a valid credit plan.');
   }
 
+  const userRef = db.collection('users').doc(userId);
+  const userDoc = await userRef.get();
+  if (!userDoc.exists) throw new HttpsError('not-found', 'User not found');
+
   const stripe = new Stripe(stripeSecretKey.value().trim());
+  const origin = request.rawRequest?.headers?.origin || 'http://localhost:5173';
 
   try {
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
       line_items: [
         {
           price_data: {
             currency: 'usd',
             product: STRIPE_PRODUCT_ID,
-            unit_amount: PRICE_AMOUNT,
+            unit_amount: plan.priceCents,
           },
           quantity: 1,
         },
       ],
       mode: 'payment',
-      success_url: `${request.rawRequest?.headers?.origin || 'http://localhost:5173'}?payment=success`,
-      cancel_url: `${request.rawRequest?.headers?.origin || 'http://localhost:5173'}?payment=cancelled`,
+      client_reference_id: userId,
+      success_url: `${origin}?payment=success&plan=${encodeURIComponent(plan.id)}`,
+      cancel_url: `${origin}?payment=cancelled&plan=${encodeURIComponent(plan.id)}`,
       metadata: {
-        userId: userId,
-        credits: CREDITS_PER_PURCHASE.toString(),
+        userId,
+        planId: plan.id,
+        planName: plan.name,
+        credits: String(plan.credits),
+        priceCents: String(plan.priceCents),
       },
     });
 
-    // Create pending transaction
-    await db.collection('users').doc(userId).collection('transactions').add({
+    await userRef.collection('transactions').doc(session.id).set({
       type: 'purchase',
-      amount: CREDITS_PER_PURCHASE,
-      dollarAmount: PRICE_AMOUNT / 100,
+      planId: plan.id,
+      planName: plan.name,
+      amount: plan.credits,
+      dollarAmount: plan.priceCents / 100,
       status: 'pending',
       stripeSessionId: session.id,
       stripePaymentIntentId: '',
+      checkoutUrl: session.url || '',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -2932,33 +3057,54 @@ exports.stripeWebhook = onRequest({ secrets: [stripeSecretKey, stripeWebhookSecr
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const userId = session.metadata?.userId;
-    const credits = parseInt(session.metadata?.credits || '50', 10);
+    const plan = getCreditPlan(session.metadata?.planId);
+    const credits = plan ? plan.credits : parseInt(session.metadata?.credits || '0', 10);
+    const priceCents = plan ? plan.priceCents : parseInt(session.metadata?.priceCents || '0', 10);
 
-    if (userId) {
+    if (userId && credits > 0) {
       try {
         const userRef = db.collection('users').doc(userId);
-        
-        // Add credits to user
-        await userRef.update({
-          credits: admin.firestore.FieldValue.increment(credits)
+        const transactionRef = userRef.collection('transactions').doc(session.id);
+        let applied = false;
+
+        await db.runTransaction(async (transaction) => {
+          const transactionSnap = await transaction.get(transactionRef);
+          if (!shouldApplyCheckoutCompletion(transactionSnap.exists ? transactionSnap.data() : null)) {
+            return;
+          }
+
+          const now = admin.firestore.FieldValue.serverTimestamp();
+          transaction.set(userRef, {
+            credits: admin.firestore.FieldValue.increment(credits),
+            creditPlan: plan ? {
+              id: plan.id,
+              name: plan.name,
+              source: 'purchase',
+            } : {
+              id: session.metadata?.planId || 'unknown',
+              name: session.metadata?.planName || 'Credits',
+              source: 'purchase',
+            },
+            updatedAt: now,
+          }, { merge: true });
+          transaction.set(transactionRef, {
+            type: 'purchase',
+            planId: plan?.id || session.metadata?.planId || 'unknown',
+            planName: plan?.name || session.metadata?.planName || 'Credits',
+            amount: credits,
+            dollarAmount: priceCents / 100,
+            status: 'completed',
+            stripeSessionId: session.id,
+            stripePaymentIntentId: session.payment_intent || '',
+            completedAt: now,
+            updatedAt: now,
+          }, { merge: true });
+          applied = true;
         });
 
-        // Update transaction status
-        const transactionsRef = db.collection('users').doc(userId).collection('transactions');
-        const pendingTx = await transactionsRef
-          .where('stripeSessionId', '==', session.id)
-          .where('status', '==', 'pending')
-          .limit(1)
-          .get();
-
-        if (!pendingTx.empty) {
-          await pendingTx.docs[0].ref.update({
-            status: 'completed',
-            stripePaymentIntentId: session.payment_intent || '',
-          });
-        }
-
-        console.log(`Added ${credits} credits to user ${userId}`);
+        console.log(applied
+          ? `Added ${credits} credits to user ${userId} for ${session.id}`
+          : `Ignored duplicate checkout completion for ${session.id}`);
       } catch (error) {
         console.error('Error updating user credits:', error);
       }
@@ -3977,24 +4123,17 @@ exports.runResumeAgentStreaming = onCall(
 
     const userId = request.auth.uid;
     const userRef = db.collection('users').doc(userId);
-    const userSnap = await userRef.get();
-    if (!userSnap.exists) throw new HttpsError('not-found', 'User not found');
-
-    const cost = Math.max(1, parseInt(agentRunCreditCost.value(), 10) || 5);
-    const before = userSnap.data().credits || 0;
-    if (before < cost) {
-      throw new HttpsError('resource-exhausted',
-        `Insufficient credits. This run costs ${cost} credits, you have ${before}.`);
-    }
 
     // Pre-deduct so concurrent runs can't double-spend. Refund on failure.
-    await userRef.update({ credits: admin.firestore.FieldValue.increment(-cost) });
+    const cost = getAgentRunCostServer();
+    const creditState = await deductCreditsOrThrow(userRef, cost, 'resume generation');
+    let creditsRemaining = creditState.after;
     let refunded = false;
     const refund = async (reason) => {
       if (refunded) return;
       refunded = true;
-      await userRef.update({ credits: admin.firestore.FieldValue.increment(cost) });
-      console.warn(`[agent] refunded ${cost} credits to ${userId}: ${reason}`);
+      await refundCredits(userRef, cost, `agent_${reason}`);
+      creditsRemaining = creditState.after + cost;
     };
 
     const isStreaming = typeof response?.sendChunk === 'function';
@@ -4343,7 +4482,6 @@ exports.runResumeAgentStreaming = onCall(
       }
     }
 
-    const after = (userSnap.data().credits || 0) - cost;
     const elapsedMs = Date.now() - startedAt;
 
     // Server-side persistence: do not depend on client staying alive.
@@ -4387,6 +4525,7 @@ exports.runResumeAgentStreaming = onCall(
     } else if (sourceResumeId && !finalValidator.ok) {
       console.log('[agent] skipping server-side persistence due to validator hard issues');
       await send({ type: 'status', stage: 'review-required' });
+      await refund('validator_failed_no_persist');
     } else {
       console.log('[agent] sourceResumeId not provided; skipping server-side persistence');
     }
@@ -4398,7 +4537,7 @@ exports.runResumeAgentStreaming = onCall(
       metadata: finalResume.metadata || null,
       validator: finalValidator,
       usage: usageSummary,
-      creditsRemaining: after,
+      creditsRemaining,
       newResumeId,
       aiTrace,
     };
