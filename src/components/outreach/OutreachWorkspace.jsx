@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import useOutreachCounts from '../../hooks/useOutreachCounts';
 import useGmailReplySync from '../../hooks/useGmailReplySync';
-import ComposeView from './ComposeView';
+import FlowsView from './FlowsView';
 import SentView from './SentView';
 import RepliesView from './RepliesView';
 import FollowUpsView from './FollowUpsView';
@@ -12,7 +12,7 @@ import TemplatesView from './TemplatesView';
 import SettingsView from './SettingsView';
 
 const NAV = [
-  { id: 'compose',    label: 'Compose',    icon: Sparkles },
+  { id: 'compose',    label: 'Flows',      icon: Sparkles },
   { id: 'sent',       label: 'Sent',       icon: Send     },
   { id: 'replies',    label: 'Replies',    icon: Inbox    },
   { id: 'followups',  label: 'Follow-ups', icon: Bell     },
@@ -78,11 +78,10 @@ const OutreachWorkspace = ({ user, onResumeCreated }) => {
       {/* Content */}
       <main className="flex-1 overflow-y-auto">
         {view === 'compose' && (
-          <ComposeView
+          <FlowsView
             user={user}
             onSent={(appId) => { setSelectedAppId(appId); setView('sent'); }}
             onResumeCreated={onResumeCreated}
-            onGoToSettings={() => setView('settings')}
           />
         )}
         {view === 'sent' && (

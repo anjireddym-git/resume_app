@@ -1,5 +1,6 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onRequest } = require('firebase-functions/v2/https');
+const { onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onMessagePublished } = require('firebase-functions/v2/pubsub');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { defineSecret, defineString } = require('firebase-functions/params');
@@ -1506,6 +1507,794 @@ async function draftFollowUpEmail(aiClient, model, provider, data = {}) {
   if (!parsed.subject) parsed.subject = subjectFallback;
   return parsed;
 }
+
+// ============================================================================
+// Persistent Outreach Flows
+// ============================================================================
+
+const OUTREACH_AGENT_FIELDS = [
+  'headline',
+  'summary',
+  'jobTitles',
+  'experience',
+  'skills',
+  'projects',
+  'internships',
+  'hackathons',
+  'certifications',
+];
+
+const DEFAULT_OUTREACH_SETTINGS_SERVER = {
+  defaultFollowUp: {
+    enabled: true,
+    intervalDays: 7,
+    intervalUnit: 'days',
+    intervalValue: 7,
+    maxFollowUps: 3,
+  },
+  defaultCc: [],
+  defaultBcc: [],
+  signature: '',
+  visaType: '',
+  aiTone: 'professional',
+};
+
+function serverTimestamp() {
+  return admin.firestore.FieldValue.serverTimestamp();
+}
+
+function sanitizeFirestoreValue(value) {
+  if (value === undefined) return null;
+  if (value === null) return null;
+  const TimestampCtor = admin.firestore.Timestamp;
+  const GeoPointCtor = admin.firestore.GeoPoint;
+  const DocumentReferenceCtor = admin.firestore.DocumentReference;
+  if (
+    value
+    && typeof value === 'object'
+    && (
+      (typeof TimestampCtor === 'function' && value instanceof TimestampCtor)
+      || (typeof GeoPointCtor === 'function' && value instanceof GeoPointCtor)
+      || (typeof DocumentReferenceCtor === 'function' && value instanceof DocumentReferenceCtor)
+      || value._methodName
+      || /Transform|FieldValue/i.test(value.constructor?.name || '')
+    )
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(sanitizeFirestoreValue);
+  if (value instanceof Date) return value;
+  if (typeof value !== 'object') return value;
+  const out = {};
+  Object.entries(value).forEach(([key, child]) => {
+    if (child !== undefined) out[key] = sanitizeFirestoreValue(child);
+  });
+  return out;
+}
+
+function normalizeOutreachSettingsServer(stored = {}) {
+  return {
+    ...DEFAULT_OUTREACH_SETTINGS_SERVER,
+    ...(stored || {}),
+    defaultFollowUp: {
+      ...DEFAULT_OUTREACH_SETTINGS_SERVER.defaultFollowUp,
+      ...(stored?.defaultFollowUp || {}),
+    },
+    defaultCc: Array.isArray(stored?.defaultCc) ? stored.defaultCc : [],
+    defaultBcc: Array.isArray(stored?.defaultBcc) ? stored.defaultBcc : [],
+  };
+}
+
+function appendSignatureServer(body, signature) {
+  if (!signature || !String(signature).trim()) return body || '';
+  const sig = String(signature).trim();
+  if (String(body || '').includes(sig)) return body || '';
+  return `${String(body || '').trimEnd()}\n\n—\n${sig}\n`;
+}
+
+function summarizeJobDescription(jobDescription) {
+  const firstLine = String(jobDescription || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+  return (firstLine || 'Untitled outreach flow').slice(0, 140);
+}
+
+function emptyEmailDraftServer() {
+  return {
+    to: '',
+    cc: '',
+    bcc: '',
+    subject: '',
+    body: '',
+    recipientName: '',
+    confidence: 0,
+  };
+}
+
+function normalizeEmailDraftServer(draft = {}) {
+  return {
+    to: String(draft.to || '').trim(),
+    cc: String(draft.cc || ''),
+    bcc: String(draft.bcc || ''),
+    subject: String(draft.subject || ''),
+    body: String(draft.body || ''),
+    recipientName: String(draft.recipientName || ''),
+    confidence: Number(draft.confidence || 0),
+  };
+}
+
+function normalizeFollowUpServer(followUp, settings = DEFAULT_OUTREACH_SETTINGS_SERVER) {
+  const source = followUp || settings.defaultFollowUp || DEFAULT_OUTREACH_SETTINGS_SERVER.defaultFollowUp;
+  const intervalUnit = ['minutes', 'hours', 'days'].includes(source.intervalUnit)
+    ? source.intervalUnit
+    : 'days';
+  const intervalValue = Math.max(1, Number(source.intervalValue ?? source.intervalDays ?? 7) || 7);
+  return {
+    enabled: source.enabled !== false,
+    intervalDays: intervalUnit === 'days' ? intervalValue : Number(source.intervalDays || 0),
+    intervalUnit,
+    intervalValue,
+    maxFollowUps: Math.max(1, Number(source.maxFollowUps || 3) || 3),
+  };
+}
+
+function outreachFollowUpIntervalMs(followUp) {
+  const unit = followUp?.intervalUnit;
+  const value = Number(followUp?.intervalValue);
+  if (unit && value > 0) {
+    if (unit === 'minutes') return value * 60 * 1000;
+    if (unit === 'hours') return value * 60 * 60 * 1000;
+    if (unit === 'days') return value * 24 * 60 * 60 * 1000;
+  }
+  const days = Number(followUp?.intervalDays) || 7;
+  return days * 24 * 60 * 60 * 1000;
+}
+
+function getAgentRunCostServer() {
+  return Math.max(1, parseInt(agentRunCreditCost.value(), 10) || 5);
+}
+
+function getOutreachFlowCost(flow = {}) {
+  if (flow.mode === 'existing' || flow.resultResumeId) return 1;
+  return getAgentRunCostServer() + 1;
+}
+
+function buildFullResumeServer(group = {}, resume = {}) {
+  const shared = group.sharedData || {};
+  const custom = resume.customData || {};
+  const mergedExperience = (shared.experience || []).map((sharedExp, index) => ({
+    ...sharedExp,
+    ...(custom.experience?.[index] || {}),
+  }));
+  const hasEducationOverride = custom.educationOverride === true
+    || (Array.isArray(custom.education) && custom.education.length > 0);
+
+  return {
+    personalInfo: {
+      ...(shared.personalInfo || {}),
+      ...(custom.personalInfo || {}),
+    },
+    summary: custom.summary || '',
+    experience: mergedExperience,
+    education: hasEducationOverride ? (custom.education || []) : (shared.education || []),
+    skills: custom.skills || {},
+    projects: custom.projects || [],
+    certifications: custom.certifications || [],
+    internships: custom.internships || [],
+    hackathons: custom.hackathons || [],
+    customSections: custom.customSections || {},
+    customSectionDefs: group.customSectionDefs || [],
+    sectionFormats: resume.sectionFormats || {},
+    themeConfig: group.themeConfig || {},
+    layoutSource: group.layoutSource || 'template',
+    layoutConfig: group.layoutConfig || null,
+  };
+}
+
+async function loadFullResumeForOutreach(userId, resumeId) {
+  const resumeSnap = await db.collection('resumes').doc(resumeId).get();
+  if (!resumeSnap.exists) throw new Error('Resume not found');
+  const resume = { id: resumeSnap.id, ...resumeSnap.data() };
+  if (resume.userId !== userId) throw new Error('Resume does not belong to this user');
+  if (!resume.groupId) throw new Error('Resume has no group');
+
+  const groupSnap = await db.collection('resumeGroups').doc(resume.groupId).get();
+  if (!groupSnap.exists) throw new Error('Resume group not found');
+  const group = { id: groupSnap.id, ...groupSnap.data() };
+  if (group.userId !== userId) throw new Error('Resume group does not belong to this user');
+
+  return { resume, group, full: buildFullResumeServer(group, resume) };
+}
+
+async function addOutreachFlowEvent(flowRef, type, message, data = {}) {
+  await flowRef.collection('events').add(sanitizeFirestoreValue({
+    type,
+    message,
+    data,
+    createdAt: serverTimestamp(),
+    createdAtMs: Date.now(),
+  }));
+}
+
+async function updateOutreachFlowProgress(flowRef, patch, event = null) {
+  await flowRef.update(sanitizeFirestoreValue({
+    ...patch,
+    updatedAt: serverTimestamp(),
+  }));
+  if (event) {
+    await addOutreachFlowEvent(flowRef, event.type || 'progress', event.message || '', event.data || {});
+  }
+}
+
+async function assertOutreachFlowOwner(flowId, userId) {
+  const flowRef = db.collection('outreachFlows').doc(flowId);
+  const snap = await flowRef.get();
+  if (!snap.exists) throw new HttpsError('not-found', 'Outreach flow not found');
+  const flow = snap.data();
+  if (flow.userId !== userId) throw new HttpsError('permission-denied', 'Outreach flow does not belong to this user');
+  return { flowRef, flow };
+}
+
+function buildOutreachUserProfileServer(userData = {}, settings = {}) {
+  return {
+    name: userData.displayName || userData.email || '',
+    email: userData.email || '',
+    tone: settings.aiTone || 'professional',
+    visaType: settings.visaType || '',
+  };
+}
+
+async function checkOutreachFlowCanceled(flowRef) {
+  const snap = await flowRef.get();
+  const flow = snap.exists ? snap.data() : {};
+  if (flow.status === 'canceled' || flow.cancelRequested) {
+    const err = new Error('Outreach flow was canceled');
+    err.code = 'outreach/canceled';
+    throw err;
+  }
+}
+
+async function refundOutreachCredits(userId, amount, reason, flowRef = null) {
+  const refundAmount = Math.max(0, Number(amount || 0));
+  if (refundAmount <= 0) return;
+  await db.collection('users').doc(userId).update({
+    credits: admin.firestore.FieldValue.increment(refundAmount),
+  });
+  if (flowRef) {
+    await addOutreachFlowEvent(flowRef, 'credits_refunded', `Refunded ${refundAmount} credit${refundAmount === 1 ? '' : 's'}.`, { reason });
+  }
+}
+
+exports.createOutreachFlow = onCall({ cors: true }, async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
+  const userId = request.auth.uid;
+  const jobDescription = String(request.data?.jobDescription || '').trim();
+  if (!jobDescription) throw new HttpsError('invalid-argument', 'jobDescription is required');
+
+  const flowRef = db.collection('outreachFlows').doc();
+  const now = serverTimestamp();
+  await flowRef.set({
+    userId,
+    status: 'draft',
+    isActive: true,
+    archived: false,
+    jobDescription,
+    jobDescriptionPreview: jobDescription.slice(0, 500),
+    title: summarizeJobDescription(jobDescription),
+    mode: null,
+    sourceResumeId: null,
+    sourceResumeName: null,
+    groupId: null,
+    resultResumeId: null,
+    sentApplicationId: null,
+    emailDraft: emptyEmailDraftServer(),
+    followUp: null,
+    progress: {
+      stage: 'draft',
+      percent: 0,
+      message: 'Job description saved.',
+    },
+    error: null,
+    validator: null,
+    cancelRequested: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await addOutreachFlowEvent(flowRef, 'created', 'Job description saved.');
+  return { flowId: flowRef.id };
+});
+
+exports.enqueueOutreachFlow = onCall({ cors: true }, async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
+  const userId = request.auth.uid;
+  const flowId = String(request.data?.flowId || '').trim();
+  const sourceResumeId = String(request.data?.sourceResumeId || '').trim();
+  const mode = request.data?.mode === 'existing' ? 'existing' : 'tailored';
+  const jobDescription = String(request.data?.jobDescription || '').trim();
+  const followUpInput = request.data?.followUp || null;
+  if (!flowId) throw new HttpsError('invalid-argument', 'flowId is required');
+  if (!sourceResumeId) throw new HttpsError('invalid-argument', 'sourceResumeId is required');
+
+  const flowRef = db.collection('outreachFlows').doc(flowId);
+  const resumeRef = db.collection('resumes').doc(sourceResumeId);
+
+  await db.runTransaction(async (transaction) => {
+    const [flowSnap, resumeSnap] = await Promise.all([
+      transaction.get(flowRef),
+      transaction.get(resumeRef),
+    ]);
+    if (!flowSnap.exists) throw new HttpsError('not-found', 'Outreach flow not found');
+    if (!resumeSnap.exists) throw new HttpsError('not-found', 'Resume not found');
+    const flow = flowSnap.data();
+    const resume = resumeSnap.data();
+    if (flow.userId !== userId || resume.userId !== userId) {
+      throw new HttpsError('permission-denied', 'You can only queue your own outreach flows and resumes');
+    }
+    const finalJobDescription = jobDescription || flow.jobDescription || '';
+    if (!String(finalJobDescription).trim()) {
+      throw new HttpsError('invalid-argument', 'jobDescription is required');
+    }
+    if (['queued', 'tailoring', 'drafting_email'].includes(flow.status)) {
+      throw new HttpsError('failed-precondition', 'This flow is already running');
+    }
+    if (flow.status === 'sent') {
+      throw new HttpsError('failed-precondition', 'Sent flows cannot be re-queued');
+    }
+
+    const followUp = normalizeFollowUpServer(
+      followUpInput || flow.followUp,
+      normalizeOutreachSettingsServer({}),
+    );
+    transaction.update(flowRef, sanitizeFirestoreValue({
+      status: 'queued',
+      isActive: true,
+      archived: false,
+      mode,
+      sourceResumeId,
+      sourceResumeName: resume.name || 'Resume',
+      groupId: resume.groupId || null,
+      jobDescription: finalJobDescription,
+      jobDescriptionPreview: String(finalJobDescription).slice(0, 500),
+      title: flow.title || summarizeJobDescription(finalJobDescription),
+      emailDraft: emptyEmailDraftServer(),
+      followUp,
+      error: null,
+      validator: null,
+      cancelRequested: false,
+      workerLease: null,
+      progress: {
+        stage: 'queued',
+        percent: 5,
+        message: 'Queued for AI processing.',
+      },
+      queuedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }));
+  });
+
+  await addOutreachFlowEvent(flowRef, 'queued', mode === 'existing'
+    ? 'Queued email drafting for the selected resume.'
+    : 'Queued resume tailoring and email drafting.');
+  return { ok: true };
+});
+
+exports.retryOutreachFlow = onCall({ cors: true }, async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
+  const userId = request.auth.uid;
+  const flowId = String(request.data?.flowId || '').trim();
+  if (!flowId) throw new HttpsError('invalid-argument', 'flowId is required');
+  const { flowRef, flow } = await assertOutreachFlowOwner(flowId, userId);
+  if (!['failed', 'review_required', 'canceled', 'ready_to_send'].includes(flow.status)) {
+    throw new HttpsError('failed-precondition', 'Only failed, review-required, or ready flows can be retried');
+  }
+  if (!flow.sourceResumeId) throw new HttpsError('failed-precondition', 'Select a resume before retrying');
+  await flowRef.update({
+    status: 'queued',
+    isActive: true,
+    archived: false,
+    error: null,
+    cancelRequested: false,
+    progress: {
+      stage: 'queued',
+      percent: 5,
+      message: 'Queued for retry.',
+    },
+    queuedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  await addOutreachFlowEvent(flowRef, 'queued', 'Queued for retry.');
+  return { ok: true };
+});
+
+exports.cancelOutreachFlow = onCall({ cors: true }, async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
+  const userId = request.auth.uid;
+  const flowId = String(request.data?.flowId || '').trim();
+  if (!flowId) throw new HttpsError('invalid-argument', 'flowId is required');
+  const { flowRef, flow } = await assertOutreachFlowOwner(flowId, userId);
+  if (flow.status === 'sent') throw new HttpsError('failed-precondition', 'Sent flows cannot be canceled');
+  await flowRef.update({
+    status: 'canceled',
+    isActive: false,
+    cancelRequested: true,
+    progress: {
+      stage: 'canceled',
+      percent: 100,
+      message: 'Canceled.',
+    },
+    updatedAt: serverTimestamp(),
+  });
+  await addOutreachFlowEvent(flowRef, 'canceled', 'Outreach flow canceled.');
+  return { ok: true };
+});
+
+exports.completeOutreachSend = onCall({ cors: true }, async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'User must be logged in');
+  const userId = request.auth.uid;
+  const flowId = String(request.data?.flowId || '').trim();
+  const gmail = request.data?.gmail || {};
+  const finalDraft = normalizeEmailDraftServer(request.data?.emailDraft || {});
+  if (!flowId) throw new HttpsError('invalid-argument', 'flowId is required');
+  if (!gmail.gmailMessageId || !gmail.gmailThreadId) {
+    throw new HttpsError('invalid-argument', 'Gmail message id and thread id are required');
+  }
+
+  const flowRef = db.collection('outreachFlows').doc(flowId);
+  const sentRef = db.collection('sentApplications').doc();
+  let sentApplicationId = null;
+
+  await db.runTransaction(async (transaction) => {
+    const flowSnap = await transaction.get(flowRef);
+    if (!flowSnap.exists) throw new HttpsError('not-found', 'Outreach flow not found');
+    const flow = flowSnap.data();
+    if (flow.userId !== userId) throw new HttpsError('permission-denied', 'Outreach flow does not belong to this user');
+    if (flow.sentApplicationId) {
+      sentApplicationId = flow.sentApplicationId;
+      return;
+    }
+    if (flow.status !== 'ready_to_send') {
+      throw new HttpsError('failed-precondition', 'Only ready flows can be completed as sent');
+    }
+    const emailDraft = normalizeEmailDraftServer({ ...(flow.emailDraft || {}), ...finalDraft });
+    const followUp = normalizeFollowUpServer(flow.followUp, DEFAULT_OUTREACH_SETTINGS_SERVER);
+    const sentPayload = sanitizeFirestoreValue({
+      userId,
+      resumeId: flow.resultResumeId || flow.sourceResumeId,
+      baseResumeId: flow.sourceResumeId || null,
+      groupId: flow.groupId || null,
+      outreachFlowId: flowId,
+      jobDescription: flow.jobDescription || '',
+      recipientEmail: emailDraft.to,
+      recipientName: emailDraft.recipientName || null,
+      cc: String(emailDraft.cc || '').split(',').map((s) => s.trim()).filter(Boolean),
+      bcc: String(emailDraft.bcc || '').split(',').map((s) => s.trim()).filter(Boolean),
+      subject: emailDraft.subject,
+      body: emailDraft.body,
+      gmailMessageId: gmail.gmailMessageId,
+      gmailThreadId: gmail.gmailThreadId,
+      gmailMessageIdHeader: gmail.gmailMessageIdHeader || null,
+      matchAnalysis: flow.matchAnalysis || null,
+      replyCount: 0,
+      lastReplyAt: null,
+      followUp: followUp
+        ? {
+            enabled: !!followUp.enabled,
+            intervalDays: followUp.intervalDays ?? 7,
+            intervalUnit: followUp.intervalUnit || 'days',
+            intervalValue: followUp.intervalValue ?? followUp.intervalDays ?? 7,
+            maxFollowUps: followUp.maxFollowUps ?? 3,
+            sentCount: 0,
+            suppressedReason: null,
+            nextDueAt: followUp.enabled
+              ? admin.firestore.Timestamp.fromDate(new Date(Date.now() + outreachFollowUpIntervalMs(followUp)))
+              : null,
+          }
+        : { enabled: false },
+      sentAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+    });
+    transaction.create(sentRef, sentPayload);
+    sentApplicationId = sentRef.id;
+    transaction.update(flowRef, sanitizeFirestoreValue({
+      status: 'sent',
+      isActive: false,
+      archived: false,
+      sentApplicationId,
+      emailDraft,
+      gmailMessageId: gmail.gmailMessageId,
+      gmailThreadId: gmail.gmailThreadId,
+      gmailMessageIdHeader: gmail.gmailMessageIdHeader || null,
+      progress: {
+        stage: 'sent',
+        percent: 100,
+        message: 'Email sent successfully.',
+      },
+      sentAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }));
+  });
+
+  await addOutreachFlowEvent(flowRef, 'sent', 'Email sent successfully.', { sentApplicationId });
+  return { sentApplicationId };
+});
+
+exports.processQueuedOutreachFlow = onDocumentUpdated(
+  {
+    document: 'outreachFlows/{flowId}',
+    secrets: [geminiApiKey, openaiApiKey],
+    timeoutSeconds: 540,
+    memory: '1GiB',
+  },
+  async (event) => {
+    const before = event.data?.before?.data() || {};
+    const after = event.data?.after?.data() || {};
+    if (after.status !== 'queued' || before.status === 'queued') return;
+
+    const flowId = event.params.flowId;
+    const flowRef = db.collection('outreachFlows').doc(flowId);
+    const leaseToken = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    let leased = null;
+
+    await db.runTransaction(async (transaction) => {
+      const flowSnap = await transaction.get(flowRef);
+      if (!flowSnap.exists) return;
+      const flow = flowSnap.data();
+      if (flow.status !== 'queued') return;
+      if (flow.cancelRequested) {
+        transaction.update(flowRef, {
+          status: 'canceled',
+          isActive: false,
+          updatedAt: serverTimestamp(),
+        });
+        return;
+      }
+
+      const userRef = db.collection('users').doc(flow.userId);
+      const userSnap = await transaction.get(userRef);
+      if (!userSnap.exists) {
+        transaction.update(flowRef, {
+          status: 'failed',
+          error: { message: 'User not found' },
+          updatedAt: serverTimestamp(),
+        });
+        return;
+      }
+
+      const cost = getOutreachFlowCost(flow);
+      const credits = Number(userSnap.data().credits || 0);
+      if (credits < cost) {
+        transaction.update(flowRef, {
+          status: 'failed',
+          error: { message: `Insufficient credits. This flow needs ${cost} credit${cost === 1 ? '' : 's'}, you have ${credits}.` },
+          progress: {
+            stage: 'failed',
+            percent: 0,
+            message: 'Insufficient credits.',
+          },
+          updatedAt: serverTimestamp(),
+        });
+        return;
+      }
+
+      const nextStatus = flow.mode === 'existing' || flow.resultResumeId ? 'drafting_email' : 'tailoring';
+      transaction.update(userRef, {
+        credits: admin.firestore.FieldValue.increment(-cost),
+      });
+      transaction.update(flowRef, sanitizeFirestoreValue({
+        status: nextStatus,
+        creditCost: cost,
+        creditsCharged: true,
+        workerLease: {
+          token: leaseToken,
+          startedAt: serverTimestamp(),
+        },
+        progress: {
+          stage: nextStatus,
+          percent: nextStatus === 'tailoring' ? 15 : 65,
+          message: nextStatus === 'tailoring' ? 'Tailoring resume for this job.' : 'Drafting recruiter email.',
+        },
+        updatedAt: serverTimestamp(),
+      }));
+      leased = { flow: { id: flowId, ...flow }, cost, userData: userSnap.data() };
+    });
+
+    if (!leased) return;
+
+    const { flow, cost } = leased;
+    const userId = flow.userId;
+    const settings = normalizeOutreachSettingsServer(leased.userData.outreachSettings || {});
+    let resultResumeId = flow.resultResumeId || null;
+    let resultResume = null;
+    let baseGroup = null;
+    let tailoringCompleted = !!flow.resultResumeId || flow.mode === 'existing';
+
+    try {
+      await addOutreachFlowEvent(flowRef, 'worker_started', 'Worker picked up this outreach flow.', { leaseToken });
+      await checkOutreachFlowCanceled(flowRef);
+
+      const source = await loadFullResumeForOutreach(userId, flow.sourceResumeId);
+      baseGroup = source.group;
+
+      if (flow.mode === 'existing') {
+        resultResumeId = source.resume.id;
+        resultResume = source.full;
+      } else if (resultResumeId) {
+        const result = await loadFullResumeForOutreach(userId, resultResumeId);
+        resultResume = result.full;
+        baseGroup = result.group;
+      } else {
+        const provider = getConfiguredProvider();
+        const model = getConfiguredModel(provider, { action: 'updateResumeForJob' });
+        const aiClient = createAiClient(provider);
+        await updateOutreachFlowProgress(flowRef, {
+          status: 'tailoring',
+          progress: {
+            stage: 'tailoring',
+            percent: 25,
+            message: `Tailoring with ${model}.`,
+          },
+        }, { type: 'tailoring', message: 'AI tailoring started.', data: { provider, model } });
+
+        let generated = await updateResumeForJob(
+          aiClient,
+          model,
+          provider,
+          source.full,
+          flow.jobDescription,
+          OUTREACH_AGENT_FIELDS,
+        );
+        generated = normalizeResumeSkillCategories(generated);
+        let validator = validateAgentOutput(source.full, generated, 'jd_first', flow.jobDescription);
+
+        if (!validator.ok) {
+          await updateOutreachFlowProgress(flowRef, {
+            progress: {
+              stage: 'repairing',
+              percent: 45,
+              message: 'Repairing validation issues.',
+            },
+          }, { type: 'repairing', message: 'Validation found issues; repair pass started.', data: { issues: validator.issues } });
+          const repaired = await repairGeneratedResume({
+            provider,
+            model,
+            originalResume: source.full,
+            jobDescription: flow.jobDescription,
+            brokenResume: generated,
+            validatorIssues: validator.issues,
+            fields: OUTREACH_AGENT_FIELDS,
+          });
+          if (repaired) {
+            const repairedValidator = validateAgentOutput(source.full, repaired, 'jd_first', flow.jobDescription);
+            const originalScore = (validator.hardIssues.length * 100) + validator.softIssues.length;
+            const repairedScore = (repairedValidator.hardIssues.length * 100) + repairedValidator.softIssues.length;
+            if (repairedScore <= originalScore) {
+              generated = repaired;
+              validator = repairedValidator;
+            }
+          }
+        }
+
+        if (!validator.ok) {
+          await refundOutreachCredits(userId, 1, 'email_not_drafted_after_review_required', flowRef);
+          await updateOutreachFlowProgress(flowRef, {
+            status: 'review_required',
+            isActive: true,
+            validator,
+            error: {
+              message: 'Tailored resume needs review before drafting an email.',
+              issues: validator.issues,
+            },
+            progress: {
+              stage: 'review_required',
+              percent: 55,
+              message: 'Tailored resume needs review before email drafting.',
+            },
+            workerLease: null,
+          }, { type: 'review_required', message: 'Tailoring output needs review.', data: { issues: validator.issues } });
+          return;
+        }
+
+        await checkOutreachFlowCanceled(flowRef);
+        const aiTrace = {
+          model,
+          elapsedMs: null,
+          usage: null,
+          validator,
+          source: 'outreach-flow-worker',
+        };
+        resultResumeId = await persistGeneratedResumeServerSide({
+          userId,
+          sourceResumeId: source.resume.id,
+          generatedResume: generated,
+          mode: 'optimize',
+          jobDescription: flow.jobDescription,
+          fieldsToUpdate: OUTREACH_AGENT_FIELDS,
+          label: flow.title || 'Outreach Flow',
+          targetResumeName: null,
+          aiTrace,
+          aiMetadata: generated.metadata || null,
+        });
+        resultResume = generated;
+        tailoringCompleted = true;
+        await updateOutreachFlowProgress(flowRef, {
+          status: 'drafting_email',
+          resultResumeId,
+          groupId: baseGroup.id,
+          validator,
+          progress: {
+            stage: 'drafting_email',
+            percent: 65,
+            message: 'Tailored resume saved. Drafting recruiter email.',
+          },
+        }, { type: 'persisted', message: 'Tailored resume saved.', data: { resultResumeId } });
+      }
+
+      await checkOutreachFlowCanceled(flowRef);
+      const provider = getConfiguredProvider();
+      const model = getConfiguredModel(provider, { action: 'generateRecruiterEmail' });
+      const aiClient = createAiClient(provider);
+      const draft = await generateRecruiterEmail(
+        aiClient,
+        model,
+        provider,
+        flow.jobDescription,
+        resultResume,
+        buildOutreachUserProfileServer(leased.userData, settings),
+      );
+      const emailDraft = normalizeEmailDraftServer({
+        to: draft.recipientEmail || '',
+        cc: settings.defaultCc.join(', '),
+        bcc: settings.defaultBcc.join(', '),
+        subject: draft.subject || '',
+        body: appendSignatureServer(draft.body || '', settings.signature),
+        recipientName: draft.recipientName || '',
+        confidence: draft.confidence ?? 0,
+      });
+
+      await updateOutreachFlowProgress(flowRef, {
+        status: 'ready_to_send',
+        isActive: true,
+        resultResumeId,
+        groupId: baseGroup?.id || flow.groupId || null,
+        emailDraft,
+        followUp: normalizeFollowUpServer(flow.followUp, settings),
+        error: null,
+        workerLease: null,
+        progress: {
+          stage: 'ready_to_send',
+          percent: 90,
+          message: 'Ready to review and send.',
+        },
+        readyAt: serverTimestamp(),
+      }, { type: 'ready_to_send', message: 'Email draft is ready to review.', data: { resultResumeId } });
+    } catch (err) {
+      const isCanceled = err?.code === 'outreach/canceled';
+      const refundAmount = isCanceled ? cost : (tailoringCompleted ? 1 : cost);
+      await refundOutreachCredits(userId, refundAmount, isCanceled ? 'flow_canceled' : 'flow_failed', flowRef).catch((refundErr) => {
+        console.error('[outreach.flow] refund failed:', refundErr);
+      });
+      await updateOutreachFlowProgress(flowRef, {
+        status: isCanceled ? 'canceled' : 'failed',
+        isActive: !isCanceled,
+        error: isCanceled ? null : {
+          message: err?.message || 'Outreach flow failed.',
+        },
+        workerLease: null,
+        progress: {
+          stage: isCanceled ? 'canceled' : 'failed',
+          percent: isCanceled ? 100 : 0,
+          message: isCanceled ? 'Canceled.' : (err?.message || 'Outreach flow failed.'),
+        },
+      }, {
+        type: isCanceled ? 'canceled' : 'failed',
+        message: isCanceled ? 'Flow canceled.' : (err?.message || 'Outreach flow failed.'),
+      }).catch((updateErr) => {
+        console.error('[outreach.flow] failed to mark flow failure:', updateErr);
+      });
+    }
+  }
+);
 
 /**
  * Classify a reply snippet's sentiment so the UI can prioritize and so we can

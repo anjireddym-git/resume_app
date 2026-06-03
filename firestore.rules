@@ -87,6 +87,49 @@ service cloud.firestore {
       }
     }
 
+    // Durable pre-send outreach workflows. Cloud Functions own status changes,
+    // credits, generated resume linkage, and sent linkage. Clients may edit
+    // only draft/review fields for their own flow.
+    match /outreachFlows/{flowId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      // Created by Cloud Functions so clients cannot forge server-owned status
+      // or credit fields.
+      allow create: if false;
+      allow update: if isAuthenticated() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.userId == resource.data.userId &&
+        (
+          (
+            resource.data.status == 'draft' &&
+            request.resource.data.diff(resource.data).changedKeys().hasOnly([
+              'jobDescription',
+              'sourceResumeId',
+              'updatedAt',
+            ])
+          ) ||
+          (
+            resource.data.status == 'ready_to_send' &&
+            request.resource.data.diff(resource.data).changedKeys().hasOnly([
+              'emailDraft',
+              'followUp',
+              'updatedAt',
+            ])
+          ) ||
+          (
+            !(resource.data.status in ['queued', 'tailoring', 'drafting_email']) &&
+            request.resource.data.diff(resource.data).changedKeys().hasOnly([
+              'archived',
+              'updatedAt',
+            ])
+          )
+        );
+
+      match /events/{eventId} {
+        allow read: if isAuthenticated() &&
+          get(/databases/$(database)/documents/outreachFlows/$(flowId)).data.userId == request.auth.uid;
+      }
+    }
+
     // Follow-up / reply notifications (created by scheduled Cloud Function).
     match /notifications/{notifId} {
       allow read, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
