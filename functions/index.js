@@ -3,6 +3,7 @@ const { onRequest } = require('firebase-functions/v2/https');
 const { onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onMessagePublished } = require('firebase-functions/v2/pubsub');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
+const { setGlobalOptions } = require('firebase-functions/v2/options');
 const { defineSecret, defineString } = require('firebase-functions/params');
 const functionsV1 = require('firebase-functions/v1');
 const admin = require('firebase-admin');
@@ -53,6 +54,8 @@ const {
 // Initialize Firebase Admin
 admin.initializeApp();
 const db = admin.firestore();
+
+setGlobalOptions({ cpu: 'gcf_gen1' });
 
 // Define secrets (set via: firebase functions:secrets:set SECRET_NAME)
 const stripeSecretKey = defineSecret('STRIPE_SECRET_KEY');

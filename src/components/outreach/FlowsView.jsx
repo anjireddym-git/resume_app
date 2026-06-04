@@ -258,7 +258,7 @@ const EmailHistoryPanel = ({ emails = [], sentApplications = [], loading, error,
   );
 };
 
-const NewFlowForm = ({ onCreate, busy, sentApplications, sentApplicationsLoading, sentApplicationsError }) => {
+const NewFlowForm = ({ onCreate, onDiscard, busy, sentApplications, sentApplicationsLoading, sentApplicationsError }) => {
   const [jobDescription, setJobDescription] = useState('');
   const extractedEmails = useMemo(() => extractEmailsFromText(jobDescription), [jobDescription]);
   return (
@@ -279,7 +279,14 @@ const NewFlowForm = ({ onCreate, busy, sentApplications, sentApplicationsLoading
               placeholder="Paste the full job posting here."
               className="w-full h-80 p-3 text-sm border border-neutral-200 rounded-lg resize-none focus:outline-none focus:border-neutral-400"
             />
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={onDiscard}
+                className="h-10 px-3 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-100 inline-flex items-center gap-1.5"
+              >
+                <X className="w-4 h-4" /> Discard
+              </button>
               <button
                 type="button"
                 onClick={() => onCreate(jobDescription)}
@@ -754,6 +761,15 @@ const FlowDetail = ({
             <X className="w-4 h-4" /> Cancel
           </button>
         )}
+        {flow.status === 'draft' && (
+          <button
+            type="button"
+            onClick={archiveFlow}
+            className="h-9 px-3 border border-neutral-200 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-50 inline-flex items-center gap-1.5"
+          >
+            <Archive className="w-4 h-4" /> Archive
+          </button>
+        )}
       </div>
 
       {flow.error?.message && (
@@ -1091,6 +1107,8 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
     if (!selectedFlow?.id) return;
     try {
       await updateOutreachFlowDraft(selectedFlow.id, { archived: true });
+      setSelectedFlowId(null);
+      setShowNew(false);
     } catch (err) {
       setError(err.message || 'Failed to archive flow.');
     }
@@ -1242,6 +1260,7 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
           {showNew ? (
             <NewFlowForm
               onCreate={handleCreate}
+              onDiscard={() => setShowNew(false)}
               busy={creating}
               sentApplications={sentApplications}
               sentApplicationsLoading={sentApplicationsLoading}

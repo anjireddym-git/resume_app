@@ -276,12 +276,23 @@ const ComposeView = ({ user, onSent, onResumeCreated, onGoToSettings }) => {
           aiMetadata: final?.metadata || null,
         });
       }
+      let resumeForEmail = updated;
+      if (newId) {
+        try {
+          const persistedResume = await getResume(newId);
+          resumeForEmail = buildFullResume(group, persistedResume);
+          setTailoredResume(resumeForEmail);
+        } catch (hydrateErr) {
+          console.warn('[Outreach] Could not hydrate persisted tailored resume before email draft:', hydrateErr);
+        }
+      }
+
       setNewResumeId(newId);
       analyticsService.trackAIOptimizeSuccess(0, 0, 'tailor_and_send');
       analyticsService.trackCreditsUsed('tailor_and_send', 1);
-      const ruleMatch = calculateRuleBasedMatch(jobDescription, updated);
+      const ruleMatch = calculateRuleBasedMatch(jobDescription, resumeForEmail);
       setMatchAnalysis(ruleMatch ? { matchScore: ruleMatch.score, source: 'rule' } : null);
-      await draftEmail(updated);
+      await draftEmail(resumeForEmail);
     } catch (err) {
       console.error(err);
       setError(err.message || 'Failed to tailor resume.');

@@ -12,6 +12,7 @@ import {
   updateDocxContent,
   uploadDocxAsGoogleDoc,
 } from './googleDriveService';
+import { buildDocxRenderOptions } from './docxRenderOptions';
 import { generateDocxBlob } from './exportService';
 import {
   getDriveCleanupQueue,
@@ -68,13 +69,11 @@ export async function syncResumeToDrive({ getAccessToken, group, resume, resumeD
   if (!resume?.id) throw new Error('Resume is required to sync to Drive');
 
   const { folderId } = await ensureCurrentGroupFolder(getAccessToken, group);
-  const renderOptions = renderOptionsOverride || {
+  const renderOptions = renderOptionsOverride || buildDocxRenderOptions({
+    group,
+    resumeData,
     sectionOrder,
-    themeConfig: group.themeConfig,
-    visibleSections: group.visibleSections,
-    sectionFormats: resumeData?.sectionFormats || {},
-    customSectionDefs: group.customSectionDefs || resumeData?.customSectionDefs || [],
-  };
+  });
   const mirrorBlob = await generateDocxBlob(resumeData, renderOptions);
   const fileName = safeFileName(resume.name);
   let fileId = resume.driveFileId;

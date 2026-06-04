@@ -9,6 +9,7 @@ import ThemeEditor from './ThemeEditor';
 import GeneratedDocxPreview from './GeneratedDocxPreview';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
 import { buildSectionOrder, buildCustomSectionDefs, buildCustomSectionsMap } from '../services/layoutExtractionService';
+import { buildDocxRenderOptions } from '../services/docxRenderOptions';
 import { normalizeSummaryToPoints } from '../lib/summaryUtils';
 
 const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
@@ -133,12 +134,13 @@ const CreateGroupModal = ({ isOpen, onClose, onComplete }) => {
 
   const designRenderOptions = useMemo(() => {
     const sectionOrder = resumeData ? buildSectionOrder(resumeData) : undefined;
-    return {
+    return buildDocxRenderOptions({
+      resumeData,
       sectionOrder,
       visibleSections: sectionOrder,
       themeConfig,
       customSectionDefs: resumeData ? buildCustomSectionDefs(resumeData) : [],
-    };
+    });
   }, [resumeData, themeConfig]);
 
   if (!isOpen) return null;

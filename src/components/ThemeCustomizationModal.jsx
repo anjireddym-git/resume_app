@@ -6,6 +6,7 @@ import { updateGroupTheme } from '../services/resumeService';
 import { getOpenInDocsUrl } from '../services/googleDriveService';
 import { analyticsService } from '../services/analyticsService';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
+import { buildDocxRenderOptions } from '../services/docxRenderOptions';
 
 const ThemeCustomizationModal = ({
   isOpen,
@@ -46,17 +47,18 @@ const ThemeCustomizationModal = ({
     }
   };
 
-  const renderOptions = useMemo(() => ({
-    sectionOrder: group?.sectionOrder,
-    visibleSections: group?.visibleSections,
+  const renderOptions = useMemo(() => buildDocxRenderOptions({
+    group,
+    resumeData,
     themeConfig,
-    sectionFormats: resumeData?.sectionFormats || {},
-    customSectionDefs: group?.customSectionDefs || resumeData?.customSectionDefs || [],
   }), [
     group?.sectionOrder,
     group?.visibleSections,
     group?.customSectionDefs,
     themeConfig,
+    resumeData?.themeConfig,
+    resumeData?.sectionOrder,
+    resumeData?.visibleSections,
     resumeData?.sectionFormats,
     resumeData?.customSectionDefs,
   ]);

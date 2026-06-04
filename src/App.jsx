@@ -26,6 +26,7 @@ import { useThemeMode } from './hooks/useThemeMode';
 import { geminiService } from './services/geminiService';
 import { analyticsService } from './services/analyticsService';
 import { DEFAULT_SECTION_ORDER } from './config/templates';
+import { buildDocxRenderOptions } from './services/docxRenderOptions';
 import { normalizeSummaryToPoints } from './lib/summaryUtils';
 import { buildResumeCustomDataForSave } from './lib/resumeExperienceOverrides';
 import { 
@@ -263,17 +264,19 @@ function App() {
     };
   }, [isResizingSidebar]);
 
-  const currentRenderOptions = useMemo(() => ({
-    sectionOrder: sectionOrder.filter((s) => visibleSections.includes(s)),
+  const currentRenderOptions = useMemo(() => buildDocxRenderOptions({
+    group: currentGroup,
+    resumeData,
+    sectionOrder,
     visibleSections,
-    themeConfig: currentGroup?.themeConfig,
-    sectionFormats: resumeData?.sectionFormats || {},
-    customSectionDefs: currentGroup?.customSectionDefs || resumeData?.customSectionDefs || [],
   }), [
     sectionOrder,
     visibleSections,
     currentGroup?.themeConfig,
     currentGroup?.customSectionDefs,
+    resumeData?.themeConfig,
+    resumeData?.sectionOrder,
+    resumeData?.visibleSections,
     resumeData?.sectionFormats,
     resumeData?.customSectionDefs,
   ]);
@@ -859,13 +862,13 @@ function App() {
       const nextThemeConfig = themeConfigOverride || baseGroup.themeConfig;
       const nextSectionOrder = baseGroup.sectionOrder || DEFAULT_SECTION_ORDER;
       const nextVisibleSections = baseGroup.visibleSections || nextSectionOrder;
-      const renderOptions = {
-        sectionOrder: nextSectionOrder.filter((section) => nextVisibleSections.includes(section)),
+      const renderOptions = buildDocxRenderOptions({
+        group: baseGroup,
+        resumeData: sourceResumeData,
+        sectionOrder: nextSectionOrder,
         visibleSections: nextVisibleSections,
         themeConfig: nextThemeConfig,
-        sectionFormats: sourceResumeData?.sectionFormats || {},
-        customSectionDefs: baseGroup.customSectionDefs || sourceResumeData?.customSectionDefs || [],
-      };
+      });
       const result = await syncResumeToDriveByIds({
         getAccessToken: accessToken ? async () => accessToken : getGoogleAccessToken,
         groupId: baseGroup.id,
