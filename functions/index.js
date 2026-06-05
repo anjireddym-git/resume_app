@@ -32,6 +32,12 @@ const {
   validateResumeAuthenticity,
 } = require('./resumeAuthenticity');
 const {
+  buildEvidenceMatrix,
+  buildTargetRoleContract,
+  buildTargetRoleContractInstructions,
+  validateTargetRoleContract,
+} = require('./targetRoleContract');
+const {
   buildRecruiterEmailPrompt,
   normalizeOutreachSubject,
   prepareFollowUpEmailPrompt,
@@ -308,7 +314,7 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
 
     switch (action) {
       case 'updateResumeForJob':
-        result = await updateResumeForJob(aiClient, model, provider, data.resume, data.jobDescription, data.fieldsToUpdate);
+        result = await updateResumeForJob(aiClient, model, provider, data.resume, data.jobDescription, data.fieldsToUpdate, { throwOnHardFailure: true });
         break;
       case 'analyzeMatch':
         result = await analyzeMatch(aiClient, model, provider, data.resume, data.jobDescription);
@@ -320,7 +326,7 @@ exports.callAI = onCall({ secrets: [geminiApiKey, openaiApiKey], timeoutSeconds:
         result = await generateRefactoredHighlights(aiClient, model, provider, data.context, data.highlights);
         break;
       case 'transformResumeForRole':
-        result = await transformResumeForRole(aiClient, model, provider, data.resume, data.targetRole, data.fieldsToUpdate);
+        result = await transformResumeForRole(aiClient, model, provider, data.resume, data.targetRole, data.fieldsToUpdate, { throwOnHardFailure: true });
         break;
       case 'extractResumeFromFile':
         result = await extractResumeFromFile(aiClient, model, provider, data.base64Data, data.mimeType);
@@ -429,11 +435,37 @@ ${olderLine}
 - Use one complete sentence per bullet unless the user specifically asks for another style. Do not insert manual newline characters inside individual bullets.`;
 }
 
+function buildTargetRoleContractContext(baseResume = {}, targetText = '') {
+  const targetContract = buildTargetRoleContract(targetText);
+  const evidenceMatrix = buildEvidenceMatrix(baseResume, targetContract);
+  const instructions = buildTargetRoleContractInstructions(targetContract, evidenceMatrix);
+  return { targetContract, evidenceMatrix, instructions };
+}
+
+function attachTargetContractMetadata(resume, validator) {
+  if (!resume || typeof resume !== 'object' || !validator?.targetContract) return resume;
+  const roleAssumptions = (validator.coverageReport?.requirements || [])
+    .filter((requirement) => requirement.evidence === 'role_default_unverified')
+    .map((requirement) => requirement.label);
+
+  return {
+    ...resume,
+    metadata: {
+      ...(resume.metadata || {}),
+      targetContractId: validator.targetContract.id,
+      roleAssumptions,
+      evidenceWarnings: validator.evidenceWarnings || [],
+      coverageReport: validator.coverageReport || null,
+    },
+  };
+}
+
 /**
  * Transform resume for a target role (career pivot mode)
  * More aggressive rewriting for role/career changes
  */
-async function transformResumeForRole(aiClient, model, provider, currentResume, targetRole, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications']) {
+async function transformResumeForRole(aiClient, model, provider, currentResume, targetRole, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'], options = {}) {
+  const targetContext = buildTargetRoleContractContext(currentResume, targetRole);
   const prompt = `You are an elite career pivot strategist and ATS optimization expert. Transform this resume to position the candidate as a TOP candidate for the target role.
 
 CURRENT RESUME:
@@ -453,6 +485,8 @@ CRITICAL CONTENT RULES (MUST FOLLOW):
 ${buildContractDensityInstructions(currentResume)}
 
 ${buildAuthenticityInstructions(currentResume, targetRole)}
+
+${targetContext.instructions}
 
 ═══════════════════════════════════════════════════════════════════════════════
 ACTION VERBS (Start EVERY bullet with one of these):
@@ -525,10 +559,19 @@ Return the complete transformed resume as valid JSON. No markdown, no code fence
 
   let text = await callAIText(aiClient, model, provider, prompt);
   text = text.replace(/\`\`\`json\n?/g, '').replace(/\`\`\`\n?/g, '').trim();
-  return normalizeResumeSkillCategories(JSON.parse(text));
+  const generated = normalizeResumeSkillCategories(JSON.parse(text));
+  return validateAndRepairGeneratedResume({
+    provider,
+    model,
+    originalResume: currentResume,
+    generatedResume: generated,
+    targetText: targetRole,
+    fields: fieldsToUpdate,
+    throwOnHardFailure: !!options.throwOnHardFailure,
+  });
 }
 
-async function updateResumeForJob(aiClient, model, provider, currentResume, jobDescription, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications']) {
+async function updateResumeForJob(aiClient, model, provider, currentResume, jobDescription, fieldsToUpdate = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'], options = {}) {
   const fieldDescriptions = {
     headline: 'personalInfo.title - Rewrite the professional headline to align with target role',
     summary: 'summary - Completely rewrite to position candidate for this specific role',
@@ -548,6 +591,7 @@ async function updateResumeForJob(aiClient, model, provider, currentResume, jobD
 
   const allFields = ['headline', 'summary', 'jobTitles', 'experience', 'skills', 'projects', 'internships', 'hackathons', 'certifications'];
   const preserveFields = allFields.filter(f => !fieldsToUpdate.includes(f));
+  const targetContext = buildTargetRoleContractContext(currentResume, jobDescription);
 
   const prompt = `You are an elite resume strategist and ATS optimization expert. Transform this resume to be a PERFECT, HIGH-RANKING match for the target job.
 
@@ -577,6 +621,8 @@ CRITICAL CONTENT RULES (MUST FOLLOW):
 ${buildContractDensityInstructions(currentResume)}
 
 ${buildAuthenticityInstructions(currentResume, jobDescription)}
+
+${targetContext.instructions}
 
 ═══════════════════════════════════════════════════════════════════════════════
 ACTION VERBS (Start EVERY bullet with one of these):
@@ -636,7 +682,16 @@ Return ONLY valid JSON. No markdown, no code fences.`;
 
   let text = await callAIText(aiClient, model, provider, prompt);
   text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  return normalizeResumeSkillCategories(JSON.parse(text));
+  const generated = normalizeResumeSkillCategories(JSON.parse(text));
+  return validateAndRepairGeneratedResume({
+    provider,
+    model,
+    originalResume: currentResume,
+    generatedResume: generated,
+    targetText: jobDescription,
+    fields: fieldsToUpdate,
+    throwOnHardFailure: !!options.throwOnHardFailure,
+  });
 }
 
 async function analyzeMatch(aiClient, model, provider, currentResume, jobDescription) {
@@ -2564,6 +2619,7 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
         );
         generated = normalizeResumeSkillCategories(generated);
         let validator = validateAgentOutput(source.full, generated, 'jd_first', flow.jobDescription);
+        generated = attachTargetContractMetadata(generated, validator);
 
         if (!validator.ok) {
           await updateOutreachFlowProgress(flowRef, {
@@ -2587,7 +2643,7 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
             const originalScore = (validator.hardIssues.length * 100) + validator.softIssues.length;
             const repairedScore = (repairedValidator.hardIssues.length * 100) + repairedValidator.softIssues.length;
             if (repairedScore <= originalScore) {
-              generated = repaired;
+              generated = attachTargetContractMetadata(repaired, repairedValidator);
               validator = repairedValidator;
             }
           }
@@ -4146,6 +4202,13 @@ function validateAgentOutput(original, generated, validationMode = 'jd_first', j
   hardIssues.push(...densityIssues.hardIssues);
   const authenticityIssues = validateResumeAuthenticity(original, generated, jobDescription);
   softIssues.push(...authenticityIssues.softIssues);
+  const targetContract = buildTargetRoleContract(jobDescription);
+  const evidenceMatrix = buildEvidenceMatrix(original, targetContract);
+  const targetContractIssues = validateTargetRoleContract(original, generated, targetContract, evidenceMatrix);
+  hardIssues.push(...targetContractIssues.hardIssues);
+  const coverageIssues = targetContractIssues.coverageIssues || [];
+  const evidenceWarnings = targetContractIssues.evidenceWarnings || [];
+  const coverageReport = targetContractIssues.coverageReport || null;
 
   const jdKeywords = extractJdKeywords(jobDescription);
   const genText = flattenResumeText(generated);
@@ -4240,12 +4303,20 @@ function validateAgentOutput(original, generated, validationMode = 'jd_first', j
     }
   }
 
-  const issues = [...hardIssues, ...softIssues];
+  const issues = [
+    ...hardIssues,
+    ...softIssues,
+    ...evidenceWarnings.map((warning) => `evidence warning: ${warning}`),
+  ];
   return {
     ok: hardIssues.length === 0,
     issues,
     hardIssues,
     softIssues,
+    targetContract,
+    coverageIssues,
+    evidenceWarnings,
+    coverageReport,
     keywordCoverage: { jdKeywords, coveredKeywords, coverageRatio, headlineCovered, latestCovered },
   };
 }
@@ -4269,6 +4340,7 @@ async function repairGeneratedResume({
   fields,
 }) {
   const systemInstruction = buildJdFirstResumeSystemInstruction();
+  const targetContext = buildTargetRoleContractContext(originalResume, jobDescription);
 
   const commonHeader =
     `The previously generated resume FAILED automated validation. Fix ONLY the ` +
@@ -4288,6 +4360,7 @@ async function repairGeneratedResume({
     `- Fix authenticity issues by diversifying the per-role stack chronology; do not make every company look like the same JD-template role.\n` +
     `- Rewrite near-duplicate bullets so each one has a distinct system, feature, responsibility, business context, technical constraint, collaboration pattern, metric, or operational outcome.\n` +
     `- Improve JD keyword coverage naturally in title, summary, skills, and recent experience.\n` +
+    `${targetContext.instructions ? `${targetContext.instructions}\n` : ''}` +
     `- Keep metrics plausible and remove generic or AI-sounding phrasing.\n` +
     `${buildAuthenticityInstructions(originalResume, jobDescription)}\n` +
     `- Return the FULL corrected resume JSON only. No explanations, no code fences.\n\n`;
@@ -4339,6 +4412,55 @@ async function repairGeneratedResume({
   }
 
   return normalizeResumeSkillCategories(parseStrictJson(text));
+}
+
+async function validateAndRepairGeneratedResume({
+  provider,
+  model,
+  originalResume,
+  generatedResume,
+  targetText,
+  fields,
+  throwOnHardFailure = false,
+}) {
+  let finalResume = normalizeResumeSkillCategories(generatedResume);
+  let finalValidator = validateAgentOutput(originalResume, finalResume, 'jd_first', targetText);
+  finalResume = attachTargetContractMetadata(finalResume, finalValidator);
+
+  const hasRepairableSoftIssues = finalValidator.softIssues.some((issue) =>
+    /low JD keyword|bullet too short|bullet too long|weak bullet|generic phrasing|duplicate bullet|repetitive bullet|too many bullets|target stack overuse|same target stack|high bullet similarity|repeated opening phrase|repeated sentence template|repeated delivery verb/i.test(issue)
+  );
+
+  if (!finalValidator.ok || hasRepairableSoftIssues) {
+    try {
+      const repaired = await repairGeneratedResume({
+        provider,
+        model,
+        originalResume,
+        jobDescription: targetText,
+        brokenResume: finalResume,
+        validatorIssues: finalValidator.issues,
+        fields,
+      });
+      if (repaired) {
+        const repairedValidator = validateAgentOutput(originalResume, repaired, 'jd_first', targetText);
+        const originalIssueScore = (finalValidator.hardIssues.length * 100) + finalValidator.softIssues.length;
+        const repairedIssueScore = (repairedValidator.hardIssues.length * 100) + repairedValidator.softIssues.length;
+        if (repairedIssueScore <= originalIssueScore) {
+          finalResume = attachTargetContractMetadata(repaired, repairedValidator);
+          finalValidator = repairedValidator;
+        }
+      }
+    } catch (repairErr) {
+      console.warn('[resume.validation] repair pass failed:', repairErr?.message || repairErr);
+    }
+  }
+
+  if (throwOnHardFailure && !finalValidator.ok) {
+    throw new Error(`Generated resume needs review: ${finalValidator.issues.slice(0, 6).join('; ')}`);
+  }
+
+  return finalResume;
 }
 
 /**
@@ -4553,6 +4675,7 @@ exports.runResumeAgentStreaming = onCall(
     // JD keyword intel is surfaced to the model and used by the validator to
     // measure coverage.
     const jdKeywords = extractJdKeywords(jobDescription);
+    const targetContext = buildTargetRoleContractContext(resume, jobDescription);
 
     const userMessage =
       `MODE: JD-FIRST RESUME TAILORING.\n\n` +
@@ -4560,6 +4683,7 @@ exports.runResumeAgentStreaming = onCall(
       (jdKeywords.length
         ? `DETECTED JD KEYWORDS TO COVER NATURALLY: ${jdKeywords.join(', ')}\n\n`
         : '') +
+      (targetContext.instructions ? `${targetContext.instructions}\n\n` : '') +
       `Preserve identity + timeline from BASE_RESUME: contact fields, company names/order, ` +
       `company locations, dates, education, and existing certifications. Rewrite role title, ` +
       `position titles, summary, skills, projects, and bullets to fit the JD. Do not add ` +
@@ -4794,6 +4918,7 @@ exports.runResumeAgentStreaming = onCall(
     // from seeing what actually happened.
 
     const validator = validateAgentOutput(resume, finalResume, validationMode, jobDescription);
+    finalResume = attachTargetContractMetadata(finalResume, validator);
     const keywordCoverageCount = validator.keywordCoverage
       ? `${validator.keywordCoverage.coveredKeywords.length}/${validator.keywordCoverage.jdKeywords.length}`
       : 'n/a';
@@ -4809,6 +4934,10 @@ exports.runResumeAgentStreaming = onCall(
       issues: validator.issues,
       hardIssues: validator.hardIssues,
       softIssues: validator.softIssues,
+      targetContract: validator.targetContract || null,
+      coverageIssues: validator.coverageIssues || [],
+      evidenceWarnings: validator.evidenceWarnings || [],
+      coverageReport: validator.coverageReport || null,
       keywordCoverage: validator.keywordCoverage || null,
     });
 
@@ -4834,6 +4963,7 @@ exports.runResumeAgentStreaming = onCall(
         });
         if (repaired) {
           const repairedValidator = validateAgentOutput(resume, repaired, validationMode, jobDescription);
+          const repairedWithMetadata = attachTargetContractMetadata(repaired, repairedValidator);
           await send({ type: 'status', stage: 'repair-complete', ok: repairedValidator.ok });
           await send({
             type: 'validator',
@@ -4841,6 +4971,10 @@ exports.runResumeAgentStreaming = onCall(
             issues: repairedValidator.issues,
             hardIssues: repairedValidator.hardIssues,
             softIssues: repairedValidator.softIssues,
+            targetContract: repairedValidator.targetContract || null,
+            coverageIssues: repairedValidator.coverageIssues || [],
+            evidenceWarnings: repairedValidator.evidenceWarnings || [],
+            coverageReport: repairedValidator.coverageReport || null,
             keywordCoverage: repairedValidator.keywordCoverage || null,
           });
           // Adopt the repaired resume if it is strictly better (fewer or no hard
@@ -4849,7 +4983,7 @@ exports.runResumeAgentStreaming = onCall(
           const originalIssueScore = (validator.hardIssues.length * 100) + validator.softIssues.length;
           const repairedIssueScore = (repairedValidator.hardIssues.length * 100) + repairedValidator.softIssues.length;
           if (repairedIssueScore <= originalIssueScore) {
-            finalResume = repaired;
+            finalResume = repairedWithMetadata;
             finalValidator = repairedValidator;
           }
         } else {
