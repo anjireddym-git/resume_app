@@ -14,13 +14,14 @@ describe('generated resume skill category prompt/schema contract', () => {
     expect(source).toContain('Return skills as an ordered array of categories');
     expect(source).toContain('preserve their spelling, casing, and human wording');
     expect(source).toContain('Order categories by JD relevance');
-    expect(source).toContain('do not force languages/frameworks/tools/databases/other buckets');
+    expect(source).toContain('without forcing generic buckets');
     expect(source).not.toContain('Group by category (Languages, Frameworks, Tools, Cloud, Databases)');
   });
 
   it('normalizes parsed and repaired resumes before validation or persistence', () => {
     expect(source).toContain('finalResume = normalizeResumeSkillCategories(finalResume)');
-    expect(source).toContain('return normalizeResumeSkillCategories(parseStrictJson(text))');
+    expect(source).toContain('return normalizeResumeSkillCategories(repaired)');
+    expect(source).toContain('current = normalizeResumeSkillCategories');
     expect(source).toContain('const skillsValues = collectSkillValues(generated?.skills)');
     expect(source).toContain('skills: normalizeSkillCategories(generatedResume.skills)');
   });

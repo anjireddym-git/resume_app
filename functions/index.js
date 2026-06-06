@@ -38,6 +38,12 @@ const {
   validateTargetRoleContract,
 } = require('./targetRoleContract');
 const {
+  QUALITY_ISSUE_PATTERNS,
+  applyDeterministicQualityRepairs,
+  auditResumeQuality,
+  buildResumeQualityInstructions,
+} = require('./resumeQualityAuditor');
+const {
   buildRecruiterEmailPrompt,
   normalizeOutreachSubject,
   prepareFollowUpEmailPrompt,
@@ -439,7 +445,8 @@ function buildTargetRoleContractContext(baseResume = {}, targetText = '') {
   const targetContract = buildTargetRoleContract(targetText);
   const evidenceMatrix = buildEvidenceMatrix(baseResume, targetContract);
   const instructions = buildTargetRoleContractInstructions(targetContract, evidenceMatrix);
-  return { targetContract, evidenceMatrix, instructions };
+  const qualityInstructions = buildResumeQualityInstructions(targetContract);
+  return { targetContract, evidenceMatrix, instructions, qualityInstructions };
 }
 
 function attachTargetContractMetadata(resume, validator) {
@@ -456,6 +463,12 @@ function attachTargetContractMetadata(resume, validator) {
       roleAssumptions,
       evidenceWarnings: validator.evidenceWarnings || [],
       coverageReport: validator.coverageReport || null,
+      qualityScore: validator.qualityScore ?? null,
+      qualityIssues: validator.qualityIssues || [],
+      qualityWarnings: validator.qualityWarnings || [],
+      roleCoherenceReport: validator.roleCoherenceReport || null,
+      metricAssumptions: validator.metricAssumptions || [],
+      claimRiskReport: validator.claimRiskReport || [],
     },
   };
 }
@@ -488,6 +501,8 @@ ${buildAuthenticityInstructions(currentResume, targetRole)}
 
 ${targetContext.instructions}
 
+${targetContext.qualityInstructions}
+
 ═══════════════════════════════════════════════════════════════════════════════
 ACTION VERBS (Start EVERY bullet with one of these):
 ═══════════════════════════════════════════════════════════════════════════════
@@ -502,13 +517,11 @@ ATS OPTIMIZATION REQUIREMENTS:
 4. NO CREATIVE TITLES: Use standard job titles that match common searches
 
 ═══════════════════════════════════════════════════════════════════════════════
-QUANTIFICATION REQUIREMENTS (Add to EVERY bullet where possible):
+QUANTIFICATION REQUIREMENTS (Use only believable scale signals):
 ═══════════════════════════════════════════════════════════════════════════════
-- Performance: "Reduced latency by 40%", "Improved throughput by 3x"
-- Scale: "Processed 1M+ requests/day", "Managed 50TB data warehouse"  
-- Business: "Saved $200K annually", "Increased revenue by 15%"
-- Team: "Led team of 5 engineers", "Mentored 3 junior developers"
-- Reliability: "Achieved 99.99% uptime", "Reduced incidents by 60%"
+- If the base resume provides exact numbers, preserve them.
+- If the base resume lacks numbers, prefer conservative ranges or scale language such as "20-30%", "5-10 services", "thousands of records", "multi-environment releases", or "several APIs".
+- Avoid fake-precise claims such as "28%", "$500K", "12 services", or "99.99% uptime" unless those values appear in the base resume.
 
 ═══════════════════════════════════════════════════════════════════════════════
 TRANSFORMATION INSTRUCTIONS:
@@ -526,7 +539,7 @@ TRANSFORMATION INSTRUCTIONS:
    - Technologies/skills relevant to target role
    - Data, analytics, or domain knowledge that transfers
    - Problem-solving that applies to new field
-   - Add metrics and quantifiable achievements
+   - Add conservative scale signals only where context supports them
    - Use strong action verbs
 
 5. **SKILLS**:
@@ -551,7 +564,7 @@ STRICT RULES:
 ✗ NEVER remove experiences or projects
 ✓ CAN add skills the candidate reasonably has based on their experience
 ✓ CAN reframe/rephrase highlights to emphasize different aspects
-✓ CAN add reasonable metrics based on context
+✓ CAN add conservative plausible metric ranges based on context
 ✓ MUST use industry-standard terminology for the target role
 ✓ If target mentions specific tech (e.g., "AWS"), emphasize any cloud/infrastructure experience
 
@@ -624,6 +637,8 @@ ${buildAuthenticityInstructions(currentResume, jobDescription)}
 
 ${targetContext.instructions}
 
+${targetContext.qualityInstructions}
+
 ═══════════════════════════════════════════════════════════════════════════════
 ACTION VERBS (Start EVERY bullet with one of these):
 ═══════════════════════════════════════════════════════════════════════════════
@@ -646,16 +661,12 @@ ATS OPTIMIZATION REQUIREMENTS:
    - Include both acronyms and full names where applicable (e.g., "AWS, Amazon Web Services")
 
 ═══════════════════════════════════════════════════════════════════════════════
-QUANTIFICATION REQUIREMENTS (Add to EVERY bullet where possible):
+QUANTIFICATION REQUIREMENTS (Use only believable scale signals):
 ═══════════════════════════════════════════════════════════════════════════════
-Include metrics that demonstrate impact:
-- Performance: "Reduced latency by 40%", "Improved response time by 60%"
-- Scale: "Handled 1M+ daily requests", "Processed 10TB of data"
-- Business: "Increased revenue by $500K", "Reduced costs by 30%"
-- Efficiency: "Automated 80% of manual processes", "Decreased deployment time by 75%"
-- Team/Leadership: "Led team of 8 engineers", "Mentored 5 junior developers"
-- Reliability: "Achieved 99.99% uptime", "Reduced production incidents by 70%"
-- User Impact: "Served 2M+ active users", "Improved user retention by 25%"
+Include metrics only when they are believable:
+- Preserve exact metrics from the base resume when present.
+- If the base resume lacks numbers, use conservative ranges or scale language such as "20-30%", "5-10 services", "thousands of records", "multi-environment releases", or "several APIs".
+- Avoid fake-precise claims such as "28%", "$500K", "12 services", or "99.99% uptime" unless those values appear in the base resume.
 
 ═══════════════════════════════════════════════════════════════════════════════
 SUMMARY REQUIREMENTS (CONTRACT-RESUME POINTS):
@@ -673,7 +684,7 @@ STRICT RULES:
 2. ✗ NEVER reduce the number of bullet points or remove content
 3. ✗ NEVER use generic phrases like "various projects" or "multiple technologies"
 4. ✓ USE JOB KEYWORDS: Extract and naturally incorporate key terms from job description
-5. ✓ QUANTIFY: Add reasonable metrics based on context where not present
+5. ✓ QUANTIFY CAREFULLY: Add conservative plausible ranges only where context supports them
 6. ✓ ATS-FRIENDLY: Use standard terms that ATS systems recognize
 7. ✓ PRESERVE STRUCTURE: Keep exact JSON schema
 8. ✓ BE SPECIFIC: Use specific technologies, numbers, and outcomes
@@ -2621,7 +2632,7 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
         let validator = validateAgentOutput(source.full, generated, 'jd_first', flow.jobDescription);
         generated = attachTargetContractMetadata(generated, validator);
 
-        if (!validator.ok) {
+        if (hasRepairableValidatorIssues(validator)) {
           await updateOutreachFlowProgress(flowRef, {
             progress: {
               stage: 'repairing',
@@ -2629,13 +2640,13 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
               message: 'Repairing validation issues.',
             },
           }, { type: 'repairing', message: 'Validation found issues; repair pass started.', data: { issues: validator.issues } });
-          const repaired = await repairGeneratedResume({
+          const repaired = await repairGeneratedResumeTargeted({
             provider,
             model,
             originalResume: source.full,
             jobDescription: flow.jobDescription,
             brokenResume: generated,
-            validatorIssues: validator.issues,
+            validator,
             fields: OUTREACH_AGENT_FIELDS,
           });
           if (repaired) {
@@ -3342,7 +3353,7 @@ exports.scanDueFollowUps = onSchedule('every 5 minutes', async () => {
     .get();
 
   let created = 0;
-  let advanced = 0;
+  let maintained = 0;
   for (const docSnap of snap.docs) {
     const result = await db.runTransaction(async (transaction) => {
       const freshSnap = await transaction.get(docSnap.ref);
@@ -3364,36 +3375,53 @@ exports.scanDueFollowUps = onSchedule('every 5 minutes', async () => {
         return 'skipped';
       }
 
-      // One deterministic notification per due window makes scheduler retries
-      // harmless if an invocation is interrupted after Firestore writes begin.
+      // Keep one active reminder per application. Older code created one
+      // notification per due window and advanced nextDueAt, which let ignored
+      // reminders stack up into hundreds of duplicate cards.
       const notificationRef = db.collection('notifications')
-        .doc(`${docSnap.id}_${dueAtMillis}`);
+        .doc(docSnap.id);
       const notificationSnap = await transaction.get(notificationRef);
+      const notificationPayload = {
+        userId: app.userId,
+        type: 'follow-up-due',
+        sentApplicationId: docSnap.id,
+        recipientEmail: app.recipientEmail || null,
+        subject: app.subject || '',
+        dueAt,
+        seen: false,
+      };
       if (!notificationSnap.exists) {
         transaction.create(notificationRef, {
-          userId: app.userId,
-          type: 'follow-up-due',
-          sentApplicationId: docSnap.id,
-          recipientEmail: app.recipientEmail || null,
-          subject: app.subject || '',
-          dueAt,
-          seen: false,
+          ...notificationPayload,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+      } else {
+        const currentNotification = notificationSnap.data() || {};
+        const currentDueAtMillis = currentNotification.dueAt?.toMillis?.() || 0;
+        const reminderChanged = currentNotification.seen
+          || currentDueAtMillis !== dueAtMillis
+          || currentNotification.recipientEmail !== notificationPayload.recipientEmail
+          || currentNotification.subject !== notificationPayload.subject;
+        if (reminderChanged) {
+          transaction.update(notificationRef, {
+            ...notificationPayload,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
       }
 
-      // Advance nextDueAt so we don't keep firing on the same window.
-      const nextDate = new Date(Date.now() + _followUpIntervalMs(followUp));
-      transaction.update(docSnap.ref, {
-        pipelineStatus: 'follow_up_due',
-        'followUp.nextDueAt': admin.firestore.Timestamp.fromDate(nextDate),
-      });
-      return notificationSnap.exists ? 'advanced' : 'created';
+      if (app.pipelineStatus !== 'follow_up_due') {
+        transaction.update(docSnap.ref, {
+          pipelineStatus: 'follow_up_due',
+        });
+      }
+      return notificationSnap.exists ? 'updated' : 'created';
     });
     if (result === 'created') created += 1;
-    if (result === 'created' || result === 'advanced') advanced += 1;
+    if (result === 'created' || result === 'updated') maintained += 1;
   }
-  console.log(`scanDueFollowUps: created ${created} notifications; advanced ${advanced} due windows`);
+  console.log(`scanDueFollowUps: created ${created} notifications; maintained ${maintained} active reminders`);
 });
 
 // ============================================================================
@@ -3785,6 +3813,65 @@ const RESUME_RESPONSE_SCHEMA_OPENAI = strObj({
     atsKeywordsMissed: strStrArr,
   }),
 });
+
+const TARGETED_REPAIR_RESPONSE_SCHEMA_OPENAI = strObj({
+  title: strStr,
+  summary: strStr,
+  skills: strArr(strObj({
+    label: strStr,
+    items: strStrArr,
+  })),
+  experiencePatches: strArr(strObj({
+    experienceIndex: { type: 'integer' },
+    highlightIndex: { type: 'integer' },
+    value: strStr,
+  })),
+  projectPatches: strArr(strObj({
+    projectIndex: { type: 'integer' },
+    highlightIndex: { type: 'integer' },
+    value: strStr,
+  })),
+});
+
+const TARGETED_REPAIR_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    summary: { type: 'string' },
+    skills: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          label: { type: 'string' },
+          items: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+    experiencePatches: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          experienceIndex: { type: 'integer' },
+          highlightIndex: { type: 'integer' },
+          value: { type: 'string' },
+        },
+      },
+    },
+    projectPatches: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          projectIndex: { type: 'integer' },
+          highlightIndex: { type: 'integer' },
+          value: { type: 'string' },
+        },
+      },
+    },
+  },
+};
 
 const RESUME_IMPORT_RESPONSE_FORMAT_OPENAI = {
   type: 'json_schema',
@@ -4209,6 +4296,9 @@ function validateAgentOutput(original, generated, validationMode = 'jd_first', j
   const coverageIssues = targetContractIssues.coverageIssues || [];
   const evidenceWarnings = targetContractIssues.evidenceWarnings || [];
   const coverageReport = targetContractIssues.coverageReport || null;
+  const qualityAudit = auditResumeQuality(original, generated, jobDescription, targetContract, evidenceMatrix);
+  hardIssues.push(...qualityAudit.hardIssues);
+  softIssues.push(...qualityAudit.softIssues);
 
   const jdKeywords = extractJdKeywords(jobDescription);
   const genText = flattenResumeText(generated);
@@ -4317,101 +4407,434 @@ function validateAgentOutput(original, generated, validationMode = 'jd_first', j
     coverageIssues,
     evidenceWarnings,
     coverageReport,
+    qualityScore: qualityAudit.qualityScore,
+    qualityIssues: qualityAudit.qualityIssues || [],
+    qualityWarnings: qualityAudit.qualityWarnings || [],
+    roleCoherenceReport: qualityAudit.roleCoherenceReport || null,
+    metricAssumptions: qualityAudit.metricAssumptions || [],
+    claimRiskReport: qualityAudit.claimRiskReport || [],
+    repairPlan: qualityAudit.repairPlan || { operations: [] },
     keywordCoverage: { jdKeywords, coveredKeywords, coverageRatio, headlineCovered, latestCovered },
   };
 }
 
-/**
- * One-shot (non-streaming) repair pass. Given a resume that failed validation,
- * ask the model to fix ONLY the listed issues while preserving factual identity
- * fields and restoring any dropped sections. Returns the repaired resume object
- * or null if the repair response could not be parsed.
- *
- * Provider-agnostic: uses OpenAI strict Structured Outputs or Gemini JSON mode,
- * mirroring the streaming path so the schema contract stays identical.
- */
-async function repairGeneratedResume({
+function restoreImmutableResumeFields(original = {}, generated = {}) {
+  const restored = {
+    ...generated,
+    personalInfo: {
+      ...(generated.personalInfo || {}),
+    },
+  };
+
+  ['name', 'email', 'phone', 'location', 'linkedin', 'github'].forEach((field) => {
+    if (original.personalInfo?.[field]) restored.personalInfo[field] = original.personalInfo[field];
+  });
+
+  const originalExperience = Array.isArray(original.experience) ? original.experience : [];
+  const generatedExperience = Array.isArray(generated.experience) ? generated.experience : [];
+  if (generatedExperience.length === originalExperience.length) {
+    restored.experience = generatedExperience.map((exp, index) => ({
+      ...exp,
+      company: originalExperience[index]?.company ?? exp.company,
+      location: originalExperience[index]?.location ?? exp.location,
+      startDate: originalExperience[index]?.startDate ?? exp.startDate,
+      endDate: originalExperience[index]?.endDate ?? exp.endDate,
+      highlights: Array.isArray(exp.highlights) ? [...exp.highlights] : exp.highlights,
+    }));
+  }
+
+  if (Array.isArray(original.education)) restored.education = original.education;
+  if (Array.isArray(original.certifications)) restored.certifications = original.certifications;
+  return restored;
+}
+
+function hasRepairableValidatorIssues(validator = {}) {
+  if (!validator.ok) return true;
+  return (validator.softIssues || []).some((issue) => QUALITY_ISSUE_PATTERNS.repairableSoft.test(issue));
+}
+
+function addUniqueRepairOperation(operations, operation) {
+  if (!operation?.type) return;
+  const key = `${operation.type}:${operation.path || ''}:${operation.expIndex ?? ''}:${operation.highlightIndex ?? ''}:${operation.reason || ''}`;
+  if (operations.some((op) => `${op.type}:${op.path || ''}:${op.expIndex ?? ''}:${op.highlightIndex ?? ''}:${op.reason || ''}` === key)) return;
+  operations.push(operation);
+}
+
+function findExperienceIndexForIssueLabel(resume = {}, label = '') {
+  const normalizedLabel = String(label || '').trim().toLowerCase();
+  if (!normalizedLabel) return -1;
+  const indexed = normalizedLabel.match(/^experience\[(\d+)\]$/i);
+  if (indexed) return Number(indexed[1]);
+  return (Array.isArray(resume.experience) ? resume.experience : [])
+    .findIndex((exp) => String(exp?.company || '').trim().toLowerCase() === normalizedLabel);
+}
+
+function parseBulletIssueRepairOperations(issue = '', resume = {}) {
+  const text = String(issue || '');
+  const operations = [];
+
+  const pathMatch = text.match(/(?:at|from)\s+experience\[(\d+)\]\.highlights\[(\d+)\]/i);
+  if (pathMatch) {
+    operations.push({
+      type: 'rewrite_bullet',
+      path: `experience[${pathMatch[1]}].highlights[${pathMatch[2]}]`,
+      expIndex: Number(pathMatch[1]),
+      highlightIndex: Number(pathMatch[2]),
+      reason: text,
+    });
+    return operations;
+  }
+
+  const indexedMatch = text.match(/(?:bullet too (?:short|long)|weak bullet opening|generic phrasing|duplicate bullet) at experience "([^"]+)"\[(\d+)\]/i);
+  if (indexedMatch) {
+    const expIndex = findExperienceIndexForIssueLabel(resume, indexedMatch[1]);
+    const highlightIndex = Number(indexedMatch[2]);
+    if (expIndex >= 0 && Number.isInteger(highlightIndex)) {
+      operations.push({
+        type: 'rewrite_bullet',
+        path: `experience[${expIndex}].highlights[${highlightIndex}]`,
+        expIndex,
+        highlightIndex,
+        reason: text,
+      });
+    }
+    return operations;
+  }
+
+  const similarityMatch = text.match(/high bullet similarity at "([^"]+)": bullets (\d+) and (\d+)/i);
+  if (similarityMatch) {
+    const expIndex = findExperienceIndexForIssueLabel(resume, similarityMatch[1]);
+    if (expIndex >= 0) {
+      [Number(similarityMatch[2]) - 1, Number(similarityMatch[3]) - 1].forEach((highlightIndex) => {
+        if (!Number.isInteger(highlightIndex) || highlightIndex < 0) return;
+        operations.push({
+          type: 'rewrite_bullet',
+          path: `experience[${expIndex}].highlights[${highlightIndex}]`,
+          expIndex,
+          highlightIndex,
+          reason: text,
+        });
+      });
+    }
+    return operations;
+  }
+
+  const repeatedRoleMatch = text.match(/(?:repeated opening phrase|repeated sentence template) at "([^"]+)"/i);
+  if (repeatedRoleMatch) {
+    const expIndex = findExperienceIndexForIssueLabel(resume, repeatedRoleMatch[1]);
+    if (expIndex >= 0) {
+      operations.push({
+        type: 'rewrite_role_bullets',
+        expIndex,
+        reason: text,
+      });
+    }
+    return operations;
+  }
+
+  if (/target stack overuse|same target stack in every older role/i.test(text)) {
+    operations.push({
+      type: 'rebalance_stack_distribution',
+      reason: text,
+    });
+    return operations;
+  }
+
+  if (/repeated delivery verb across resume/i.test(text)) {
+    operations.push({
+      type: 'rewrite_cross_resume_bullets',
+      reason: text,
+    });
+  }
+
+  return operations;
+}
+
+function buildTargetedRepairPlanFromValidator(validator = {}, resume = {}) {
+  const operations = [];
+  for (const operation of ((validator.repairPlan?.operations) || [])) {
+    addUniqueRepairOperation(operations, operation);
+  }
+  (validator.coverageIssues || []).forEach((issue) => {
+    addUniqueRepairOperation(operations, { type: 'fix_target_contract', reason: issue });
+  });
+  (validator.hardIssues || [])
+    .filter((issue) => /^quality:|^target contract:/i.test(issue))
+    .forEach((issue) => {
+      if (!operations.some((op) => op.reason === issue)) {
+        addUniqueRepairOperation(operations, { type: 'fix_hard_issue', reason: issue });
+      }
+    });
+  (validator.softIssues || [])
+    .filter((issue) => QUALITY_ISSUE_PATTERNS.repairableSoft.test(issue))
+    .forEach((issue) => {
+      for (const operation of parseBulletIssueRepairOperations(issue, resume)) {
+        addUniqueRepairOperation(operations, operation);
+      }
+    });
+  return { operations };
+}
+
+function needsModelTargetedRepair(validator = {}, repairPlan = {}) {
+  const operations = repairPlan.operations || [];
+  const deterministicTypes = new Set(['reorder_skills', 'demote_off_target_skills', 'soften_metric']);
+  if ((validator.coverageIssues || []).length > 0) return true;
+  if ((validator.hardIssues || []).some((issue) => /^target contract:/i.test(issue))) return true;
+  if ((validator.hardIssues || []).some((issue) => /^quality:/.test(issue))) {
+    return operations.some((op) => !deterministicTypes.has(op.type));
+  }
+  return operations.some((op) => [
+    'rewrite_bullet',
+    'rewrite_role_bullets',
+    'rewrite_cross_resume_bullets',
+    'rebalance_stack_distribution',
+    'fix_target_contract',
+    'fix_hard_issue',
+  ].includes(op.type));
+}
+
+function collectTargetedRepairSnippets(resume = {}, repairPlan = {}, validator = {}) {
+  const snippets = [];
+  const seen = new Set();
+  const addExperienceSnippet = (expIndex, highlightIndex, reason) => {
+    if (typeof expIndex !== 'number' || typeof highlightIndex !== 'number') return;
+    const value = resume.experience?.[expIndex]?.highlights?.[highlightIndex];
+    if (!value) return;
+    const key = `experience:${expIndex}:${highlightIndex}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    snippets.push({ section: 'experience', experienceIndex: expIndex, highlightIndex, value, reason });
+  };
+  const addExperienceRange = (expIndex, limit, reason) => {
+    const highlights = Array.isArray(resume.experience?.[expIndex]?.highlights)
+      ? resume.experience[expIndex].highlights
+      : [];
+    for (let i = 0; i < Math.min(limit, highlights.length); i += 1) {
+      addExperienceSnippet(expIndex, i, reason);
+    }
+  };
+
+  for (const op of repairPlan.operations || []) {
+    if (typeof op.expIndex === 'number' && typeof op.highlightIndex === 'number') {
+      addExperienceSnippet(op.expIndex, op.highlightIndex, op.reason || op.type);
+    }
+    if (op.type === 'rewrite_role_bullets' && typeof op.expIndex === 'number') {
+      addExperienceRange(op.expIndex, 5, op.reason || 'Repair repeated same-voice bullets in this role.');
+    }
+    if (op.type === 'rebalance_stack_distribution') {
+      const experienceCount = Array.isArray(resume.experience) ? resume.experience.length : 0;
+      for (let expIndex = 1; expIndex < experienceCount; expIndex += 1) {
+        addExperienceRange(expIndex, 2, op.reason || 'Diversify older-role stack emphasis.');
+      }
+    }
+    if (op.type === 'rewrite_cross_resume_bullets') {
+      const experienceCount = Array.isArray(resume.experience) ? resume.experience.length : 0;
+      for (let expIndex = 0; expIndex < experienceCount; expIndex += 1) {
+        addExperienceRange(expIndex, 2, op.reason || 'Vary repeated delivery verbs and sentence templates across the resume.');
+      }
+    }
+  }
+
+  if ((validator.coverageIssues || []).some((issue) => /latest experience/i.test(issue))) {
+    for (let i = 0; i < Math.min(3, resume.experience?.[0]?.highlights?.length || 0); i += 1) {
+      addExperienceSnippet(0, i, 'Target contract coverage missing from latest experience.');
+    }
+  }
+
+  return snippets.slice(0, 20);
+}
+
+function applyTargetedRepairPatch(resume = {}, patch = {}) {
+  if (!patch || typeof patch !== 'object') return resume;
+  let repaired = {
+    ...resume,
+    personalInfo: { ...(resume.personalInfo || {}) },
+    experience: Array.isArray(resume.experience)
+      ? resume.experience.map((exp) => ({
+        ...exp,
+        highlights: Array.isArray(exp.highlights) ? [...exp.highlights] : exp.highlights,
+      }))
+      : resume.experience,
+    projects: Array.isArray(resume.projects)
+      ? resume.projects.map((project) => ({
+        ...project,
+        highlights: Array.isArray(project.highlights) ? [...project.highlights] : project.highlights,
+      }))
+      : resume.projects,
+  };
+
+  if (typeof patch.title === 'string' && patch.title.trim()) {
+    repaired.personalInfo.title = patch.title.trim();
+  }
+  if (typeof patch.summary === 'string' && patch.summary.trim()) {
+    repaired.summary = patch.summary.trim();
+  }
+  if (Array.isArray(patch.skills) && patch.skills.length > 0) {
+    repaired.skills = normalizeSkillCategories(patch.skills);
+  }
+
+  (Array.isArray(patch.experiencePatches) ? patch.experiencePatches : []).forEach((item) => {
+    const expIndex = Number(item?.experienceIndex);
+    const highlightIndex = Number(item?.highlightIndex);
+    const value = String(item?.value || '').trim();
+    if (!value || !Number.isInteger(expIndex) || !Number.isInteger(highlightIndex)) return;
+    if (!repaired.experience?.[expIndex]?.highlights?.[highlightIndex]) return;
+    repaired.experience[expIndex].highlights[highlightIndex] = value;
+  });
+
+  (Array.isArray(patch.projectPatches) ? patch.projectPatches : []).forEach((item) => {
+    const projectIndex = Number(item?.projectIndex);
+    const highlightIndex = Number(item?.highlightIndex);
+    const value = String(item?.value || '').trim();
+    if (!value || !Number.isInteger(projectIndex) || !Number.isInteger(highlightIndex)) return;
+    if (!repaired.projects?.[projectIndex]?.highlights?.[highlightIndex]) return;
+    repaired.projects[projectIndex].highlights[highlightIndex] = value;
+  });
+
+  return normalizeResumeSkillCategories(repaired);
+}
+
+async function requestTargetedRepairPatch({
   provider,
   model,
   originalResume,
   jobDescription,
   brokenResume,
-  validatorIssues,
+  validator,
+  repairPlan,
   fields,
 }) {
-  const systemInstruction = buildJdFirstResumeSystemInstruction();
   const targetContext = buildTargetRoleContractContext(originalResume, jobDescription);
+  const snippets = collectTargetedRepairSnippets(brokenResume, repairPlan, validator);
+  const prompt = `Repair ONLY the listed resume pieces. Do not rewrite the whole resume.
 
-  const commonHeader =
-    `The previously generated resume FAILED automated validation. Fix ONLY the ` +
-    `listed issues and return a full, corrected resume JSON.\n\n` +
-    `VALIDATION ISSUES TO FIX:\n${(validatorIssues || []).map((s) => `- ${s}`).join('\n')}\n\n`;
+RULES:
+- Preserve all companies, dates, education, certifications, and bullet count.
+- Return empty strings/arrays for fields that do not need changes.
+- If skills need repair, return the full ordered skills category array; otherwise return [].
+- If title or summary need repair, return only those strings; otherwise return "".
+- Patch only the bullets listed in TARGETED BULLET SNIPPETS.
+- For Java backend resumes, Java Backend skills must come before AI/ML, GenAI, Python/Data, and MLOps unless the JD asks for those areas.
+- For target stack overuse or "same target stack" warnings, keep the latest role JD-heavy but diversify older roles with adjacent, integration, testing, cloud, data, migration, platform, or support stories supported by ORIGINAL_RESUME.
+- For tool-stuffed bullets, use no more than 5 named technologies in the repaired bullet; replace long tool lists with a specific system, responsibility, constraint, and outcome.
+- For bullet length warnings, keep the repaired bullet between 24 and 52 words, preferably 28-45 words.
+- Metrics may use conservative ranges such as 20-30%, 5-10 services, thousands of records, or multi-environment releases.
+- Do not create fake-precise metrics like 28%, $500K, 12 services, or 99.99% uptime unless present in ORIGINAL_RESUME.
 
-  const repairRules =
-    `RULES:\n` +
-    `- Preserve contact identity, company names/order, company locations, dates, education, and existing certifications exactly.\n` +
-    `- Do not add degrees or certifications that are not present in the original resume.\n` +
-    `- Keep the JD-first role, stack, summary, skills, and bullets strong; do not revert to unrelated base-resume wording.\n` +
-    `- Keep skills as dynamic ordered { label, items } categories: preserve relevant source labels, put JD-critical categories first, and do not force languages/frameworks/tools/databases/other buckets.\n` +
-    `- Ensure the most recent experience carries the strongest JD stack coverage.\n` +
-    `- Keep the summary as ${CONTRACT_DENSITY.summaryMinPoints}-${CONTRACT_DENSITY.summaryTargetMaxPoints}+ newline-separated professional summary points; preserve a higher original count.\n` +
-    `- Use contract bullet depth: first experience 20+ bullets, all other roles 16+, and 50+ combined older-role bullets when the original has 3+ roles.\n` +
-    `- Keep bullets specific, realistic, varied, and ${CONTRACT_DENSITY.bulletTargetMinWords}-${CONTRACT_DENSITY.bulletTargetMaxWords} words when possible; avoid padding just to reach the count.\n` +
-    `- Fix authenticity issues by diversifying the per-role stack chronology; do not make every company look like the same JD-template role.\n` +
-    `- Rewrite near-duplicate bullets so each one has a distinct system, feature, responsibility, business context, technical constraint, collaboration pattern, metric, or operational outcome.\n` +
-    `- Improve JD keyword coverage naturally in title, summary, skills, and recent experience.\n` +
-    `${targetContext.instructions ? `${targetContext.instructions}\n` : ''}` +
-    `- Keep metrics plausible and remove generic or AI-sounding phrasing.\n` +
-    `${buildAuthenticityInstructions(originalResume, jobDescription)}\n` +
-    `- Return the FULL corrected resume JSON only. No explanations, no code fences.\n\n`;
+FIELDS SELECTED BY USER: ${(fields || []).join(', ')}
 
-  const repairPrompt =
-    commonHeader +
-    repairRules +
-    `FIELDS THE USER WANTS UPDATED: ${(fields || []).join(', ')}\n\n` +
-    `ORIGINAL_RESUME (identity + timeline source):\n${JSON.stringify(originalResume, null, 2)}\n\n` +
-    `BROKEN_RESUME (fix this):\n${JSON.stringify(brokenResume, null, 2)}\n\n` +
-    `<<<JD>>>\n${jobDescription}\n<<</JD>>>`;
+VALIDATOR ISSUES:
+${(validator.issues || []).map((issue) => `- ${issue}`).join('\n')}
+
+REPAIR PLAN:
+${(repairPlan.operations || []).map((op) => `- ${op.type}: ${op.reason || op.path || ''}`).join('\n')}
+
+${targetContext.instructions}
+
+${targetContext.qualityInstructions}
+
+CURRENT TITLE:
+${brokenResume.personalInfo?.title || ''}
+
+CURRENT SUMMARY:
+${brokenResume.summary || ''}
+
+CURRENT SKILLS:
+${JSON.stringify(brokenResume.skills || {}, null, 2)}
+
+TARGETED BULLET SNIPPETS:
+${snippets.map((item) => `- experience[${item.experienceIndex}].highlights[${item.highlightIndex}] (${item.reason}): ${item.value}`).join('\n')}
+
+ORIGINAL_RESUME:
+${JSON.stringify(originalResume, null, 2)}
+
+<<<JD>>>
+${jobDescription}
+<<</JD>>>
+
+Return ONLY JSON matching the targeted repair schema.`;
 
   let text = '';
   if (provider === 'openai') {
     const client = createAiClient(provider);
-    const openAIRepairRequest = {
+    const request = {
       model,
-      max_output_tokens: 50000,
+      max_output_tokens: 12000,
       input: [
-        { role: 'developer', content: systemInstruction },
-        { role: 'user', content: repairPrompt },
+        { role: 'developer', content: 'You repair resume snippets with exact JSON patches. Never return a full resume.' },
+        { role: 'user', content: prompt },
       ],
       text: {
         format: {
           type: 'json_schema',
-          name: 'tailored_resume',
+          name: 'targeted_resume_repair',
           strict: true,
-          schema: RESUME_RESPONSE_SCHEMA_OPENAI,
+          schema: TARGETED_REPAIR_RESPONSE_SCHEMA_OPENAI,
         },
       },
     };
     const reasoning = getOpenAIReasoningConfig(model);
-    if (reasoning) openAIRepairRequest.reasoning = reasoning;
-    const resp = await client.responses.create(openAIRepairRequest);
+    if (reasoning) request.reasoning = reasoning;
+    const resp = await client.responses.create(request);
     text = resp.output_text || '';
   } else {
     const aiClient = createAiClient(provider);
     const resp = await aiClient.models.generateContent({
       model,
-      contents: [{ role: 'user', parts: [{ text: repairPrompt }] }],
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
-        systemInstruction,
         responseMimeType: 'application/json',
-        responseSchema: RESUME_RESPONSE_SCHEMA,
-        maxOutputTokens: 65536,
+        responseSchema: TARGETED_REPAIR_RESPONSE_SCHEMA,
+        maxOutputTokens: 16000,
       },
     });
     text = resp.text || '';
   }
 
-  return normalizeResumeSkillCategories(parseStrictJson(text));
+  return parseStrictJson(text) || {};
+}
+
+async function repairGeneratedResumeTargeted({
+  provider,
+  model,
+  originalResume,
+  jobDescription,
+  brokenResume,
+  validator,
+  fields,
+}) {
+  let current = normalizeResumeSkillCategories(restoreImmutableResumeFields(originalResume, brokenResume));
+  let currentValidator = validator || validateAgentOutput(originalResume, current, 'jd_first', jobDescription);
+
+  for (let cycle = 0; cycle < 2; cycle += 1) {
+    const repairPlan = buildTargetedRepairPlanFromValidator(currentValidator, current);
+    current = applyDeterministicQualityRepairs(current, repairPlan, currentValidator.targetContract, jobDescription);
+    current = normalizeResumeSkillCategories(restoreImmutableResumeFields(originalResume, current));
+    currentValidator = validateAgentOutput(originalResume, current, 'jd_first', jobDescription);
+
+    if (!hasRepairableValidatorIssues(currentValidator)) break;
+
+    const nextPlan = buildTargetedRepairPlanFromValidator(currentValidator, current);
+    if (!needsModelTargetedRepair(currentValidator, nextPlan)) break;
+
+    const patch = await requestTargetedRepairPatch({
+      provider,
+      model,
+      originalResume,
+      jobDescription,
+      brokenResume: current,
+      validator: currentValidator,
+      repairPlan: nextPlan,
+      fields,
+    });
+    current = applyTargetedRepairPatch(current, patch);
+    current = normalizeResumeSkillCategories(restoreImmutableResumeFields(originalResume, current));
+    currentValidator = validateAgentOutput(originalResume, current, 'jd_first', jobDescription);
+
+    if (!hasRepairableValidatorIssues(currentValidator)) break;
+  }
+
+  return current;
 }
 
 async function validateAndRepairGeneratedResume({
@@ -4427,19 +4850,15 @@ async function validateAndRepairGeneratedResume({
   let finalValidator = validateAgentOutput(originalResume, finalResume, 'jd_first', targetText);
   finalResume = attachTargetContractMetadata(finalResume, finalValidator);
 
-  const hasRepairableSoftIssues = finalValidator.softIssues.some((issue) =>
-    /low JD keyword|bullet too short|bullet too long|weak bullet|generic phrasing|duplicate bullet|repetitive bullet|too many bullets|target stack overuse|same target stack|high bullet similarity|repeated opening phrase|repeated sentence template|repeated delivery verb/i.test(issue)
-  );
-
-  if (!finalValidator.ok || hasRepairableSoftIssues) {
+  if (hasRepairableValidatorIssues(finalValidator)) {
     try {
-      const repaired = await repairGeneratedResume({
+      const repaired = await repairGeneratedResumeTargeted({
         provider,
         model,
         originalResume,
         jobDescription: targetText,
         brokenResume: finalResume,
-        validatorIssues: finalValidator.issues,
+        validator: finalValidator,
         fields,
       });
       if (repaired) {
@@ -4684,6 +5103,7 @@ exports.runResumeAgentStreaming = onCall(
         ? `DETECTED JD KEYWORDS TO COVER NATURALLY: ${jdKeywords.join(', ')}\n\n`
         : '') +
       (targetContext.instructions ? `${targetContext.instructions}\n\n` : '') +
+      (targetContext.qualityInstructions ? `${targetContext.qualityInstructions}\n\n` : '') +
       `Preserve identity + timeline from BASE_RESUME: contact fields, company names/order, ` +
       `company locations, dates, education, and existing certifications. Rewrite role title, ` +
       `position titles, summary, skills, projects, and bullets to fit the JD. Do not add ` +
@@ -4938,6 +5358,13 @@ exports.runResumeAgentStreaming = onCall(
       coverageIssues: validator.coverageIssues || [],
       evidenceWarnings: validator.evidenceWarnings || [],
       coverageReport: validator.coverageReport || null,
+      qualityScore: validator.qualityScore ?? null,
+      qualityIssues: validator.qualityIssues || [],
+      qualityWarnings: validator.qualityWarnings || [],
+      roleCoherenceReport: validator.roleCoherenceReport || null,
+      metricAssumptions: validator.metricAssumptions || [],
+      claimRiskReport: validator.claimRiskReport || [],
+      repairPlan: validator.repairPlan || { operations: [] },
       keywordCoverage: validator.keywordCoverage || null,
     });
 
@@ -4945,20 +5372,17 @@ exports.runResumeAgentStreaming = onCall(
     // soft quality issues before persistence. We do NOT stream the repaired
     // JSON as answer chunks because the final return already carries it.
     let finalValidator = validator;
-    const hasRepairableSoftIssues = validator.softIssues.some((issue) =>
-      /low JD keyword|bullet too short|bullet too long|weak bullet|generic phrasing|duplicate bullet|repetitive bullet|too many bullets|target stack overuse|same target stack|high bullet similarity|repeated opening phrase|repeated sentence template|repeated delivery verb/i.test(issue)
-    );
-    if (!validator.ok || hasRepairableSoftIssues) {
+    if (hasRepairableValidatorIssues(validator)) {
       console.warn(`[agent] validator repair mode=${validationMode} hard=${validator.hardIssues.length} soft=${validator.softIssues.length}`);
       await send({ type: 'status', stage: 'repairing', issues: validator.issues });
       try {
-        const repaired = await repairGeneratedResume({
+        const repaired = await repairGeneratedResumeTargeted({
           provider,
           model,
           originalResume: resume,
           jobDescription,
           brokenResume: finalResume,
-          validatorIssues: validator.issues,
+          validator,
           fields,
         });
         if (repaired) {
@@ -4975,6 +5399,13 @@ exports.runResumeAgentStreaming = onCall(
             coverageIssues: repairedValidator.coverageIssues || [],
             evidenceWarnings: repairedValidator.evidenceWarnings || [],
             coverageReport: repairedValidator.coverageReport || null,
+            qualityScore: repairedValidator.qualityScore ?? null,
+            qualityIssues: repairedValidator.qualityIssues || [],
+            qualityWarnings: repairedValidator.qualityWarnings || [],
+            roleCoherenceReport: repairedValidator.roleCoherenceReport || null,
+            metricAssumptions: repairedValidator.metricAssumptions || [],
+            claimRiskReport: repairedValidator.claimRiskReport || [],
+            repairPlan: repairedValidator.repairPlan || { operations: [] },
             keywordCoverage: repairedValidator.keywordCoverage || null,
           });
           // Adopt the repaired resume if it is strictly better (fewer or no hard

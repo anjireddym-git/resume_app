@@ -50,7 +50,14 @@ export default function useOutreachCounts() {
       where('seen', '==', false),
       where('type', '==', 'follow-up-due'),
     );
-    return onSnapshot(q, (snap) => setDueFollowUps(snap.size), () => setDueFollowUps(0));
+    return onSnapshot(q, (snap) => {
+      const appIds = new Set();
+      snap.docs.forEach((notificationDoc) => {
+        const data = notificationDoc.data();
+        appIds.add(data.sentApplicationId || notificationDoc.id);
+      });
+      setDueFollowUps(appIds.size);
+    }, () => setDueFollowUps(0));
   }, [user?.uid]);
 
   // unseen replies: subscribe to user's sentApplication ids, then to all replies

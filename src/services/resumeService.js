@@ -13,7 +13,8 @@ import {
   onSnapshot,
   serverTimestamp,
   increment,
-  limit
+  limit,
+  writeBatch
 } from 'firebase/firestore';
 import { db, functions, httpsCallable, storage, storageRef, uploadBytes, getBlob, deleteObject } from '../lib/firebase';
 import { DEFAULT_THEME_CONFIG } from '../config/themeConfig';
@@ -1121,6 +1122,39 @@ export const subscribeToUnseenNotifications = (userId, onNext, onError, max = 50
 export const markNotificationSeen = async (notificationId) => {
   const ref = doc(db, 'notifications', notificationId);
   await updateDoc(ref, { seen: true, seenAt: serverTimestamp() });
+};
+
+export const markFollowUpNotificationsSeenForApplication = async (userId, sentApplicationId, max = 2000) => {
+  if (!userId || !sentApplicationId) return 0;
+  let total = 0;
+  const batchSize = 450;
+
+  while (total < max) {
+    const q = query(
+      collection(db, 'notifications'),
+      where('userId', '==', userId),
+      where('seen', '==', false),
+      where('type', '==', 'follow-up-due'),
+      where('sentApplicationId', '==', sentApplicationId),
+      limit(Math.min(batchSize, max - total)),
+    );
+    const snap = await getDocs(q);
+    if (snap.empty) break;
+
+    const batch = writeBatch(db);
+    snap.docs.forEach((notificationDoc) => {
+      batch.update(notificationDoc.ref, {
+        seen: true,
+        seenAt: serverTimestamp(),
+      });
+    });
+    await batch.commit();
+
+    total += snap.size;
+    if (snap.size < batchSize) break;
+  }
+
+  return total;
 };
 
 /**
