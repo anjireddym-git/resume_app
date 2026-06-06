@@ -15,6 +15,7 @@ import {
   snoozeFollowUp,
   setFollowUpEnabled,
   recordFollowUpSent,
+  markFollowUpNotificationsSeenForApplication,
   getUserSettings,
   listEmailTemplates,
   updateApplicationPipelineStatus,
@@ -137,6 +138,15 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
     }
   }, [application?.id]);
 
+  const clearFollowUpReminderNotifications = useCallback(async () => {
+    if (!user?.uid || !application?.id) return;
+    try {
+      await markFollowUpNotificationsSeenForApplication(user.uid, application.id, 5000);
+    } catch (err) {
+      console.warn('Follow-up reminder cleanup failed:', err.message);
+    }
+  }, [application?.id, user?.uid]);
+
   useEffect(() => {
     loadConversation();
     setDraft(null);
@@ -191,6 +201,7 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
         subject: draft.subject,
         body: draft.body,
       });
+      await clearFollowUpReminderNotifications();
       await loadConversation();
       setDraft(null);
       if (onChange) onChange();
@@ -216,7 +227,11 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
   };
 
   const handleSnooze = async (days) => {
-    try { await snoozeFollowUp(application.id, days); if (onChange) onChange(); }
+    try {
+      await snoozeFollowUp(application.id, days);
+      await clearFollowUpReminderNotifications();
+      if (onChange) onChange();
+    }
     catch (e) { setError(e.message); }
   };
 
@@ -235,7 +250,11 @@ const SentDetailPanel = ({ user, application, refreshKey, onChange }) => {
   };
 
   const handleStopReminders = async () => {
-    try { await setFollowUpEnabled(application.id, false); if (onChange) onChange(); }
+    try {
+      await setFollowUpEnabled(application.id, false);
+      await clearFollowUpReminderNotifications();
+      if (onChange) onChange();
+    }
     catch (e) { setError(e.message); }
   };
 
