@@ -18,8 +18,11 @@ describe('target role contract integration points', () => {
     expect(source).toContain('targetContract: repairedValidator.targetContract || null');
   });
 
-  it('blocks outreach persistence through review_required when contract hard issues remain', () => {
+  it('blocks email drafting but persists a review resume when hard issues remain', () => {
     expect(source).toContain("status: 'review_required'");
+    expect(source).toContain('reviewResumeId');
+    expect(source).toContain("reviewStatus: 'review_required'");
+    expect(source).toContain('outreach-flow-worker-review-required');
     expect(source).toContain('validator,');
     expect(source).toContain('Tailored resume needs review before email drafting.');
   });

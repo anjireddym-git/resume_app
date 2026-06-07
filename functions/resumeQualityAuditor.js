@@ -451,6 +451,9 @@ function auditResumeQuality(original = {}, generated = {}, targetText = '', targ
   const qualityWarnings = parts.flatMap((part) => part.warnings || []);
   const repairPlan = buildQualityRepairPlan(parts);
   const qualityScore = computeQualityScore({ hardCount: hardIssues.length, warningCount: qualityWarnings.length });
+  if (qualityScore < QUALITY_CONFIG.targetScore) {
+    hardIssues.push(`quality: quality score below threshold: ${qualityScore}/${QUALITY_CONFIG.targetScore}`);
+  }
 
   return {
     ok: hardIssues.length === 0,
@@ -494,7 +497,37 @@ function applyDeterministicQualityRepairs(resume = {}, repairPlan = {}, targetCo
     repaired.experience[op.expIndex].highlights[op.highlightIndex] = softenUnsupportedMetricText(bullet);
   }
 
+  for (const op of operations.filter((item) => item.type === 'rewrite_bullet' && /tool-stuffed|tool list|Reduce tool list/i.test(item.reason || ''))) {
+    if (typeof op.expIndex !== 'number' || typeof op.highlightIndex !== 'number') continue;
+    const bullet = repaired.experience?.[op.expIndex]?.highlights?.[op.highlightIndex];
+    if (!bullet) continue;
+    repaired.experience[op.expIndex].highlights[op.highlightIndex] = repairToolStuffedBulletText(bullet);
+  }
+
   return repaired;
+}
+
+function repairToolStuffedBulletText(text = '') {
+  const source = String(text || '');
+  const terms = [];
+  for (const term of TECH_TERMS) {
+    if (!termPattern(term).test(source)) continue;
+    const lower = term.toLowerCase();
+    if (terms.some((chosen) => chosen.toLowerCase() === lower)) continue;
+    if (terms.some((chosen) => chosen.toLowerCase().includes(lower) || lower.includes(chosen.toLowerCase()))) continue;
+    terms.push(term);
+    if (terms.length >= 4) break;
+  }
+  const stack = terms.length ? ` with ${terms.join(', ')}` : '';
+  const variants = [
+    `Reworked a backend integration path${stack} by separating request handling, persistence checks, and regression tests, giving reviewers clearer release evidence before production deployment.`,
+    `Hardened a service change path${stack} by narrowing the integration boundary, documenting expected failure cases, and adding validation steps that made backend releases easier to review.`,
+    `Clarified an API delivery workflow${stack} by connecting implementation details to test coverage, deployment readiness, and incident triage without turning the work into a tool inventory.`,
+    `Separated a platform maintenance effort${stack} into service behavior, data access, and release validation tasks so the team could review production risk before rollout.`,
+    `Improved a backend delivery thread${stack} by translating scattered implementation work into clearer ownership, test expectations, and rollout checks for production-facing changes.`,
+  ];
+  const hash = Array.from(source).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return variants[hash % variants.length];
 }
 
 function softenUnsupportedMetricText(text = '') {
@@ -541,6 +574,7 @@ module.exports = {
   auditResumeQuality,
   buildResumeQualityInstructions,
   getSkillEntries,
+  repairToolStuffedBulletText,
   reorderSkillsForTarget,
   softenUnsupportedMetricText,
 };

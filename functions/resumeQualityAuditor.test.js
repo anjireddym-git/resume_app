@@ -6,6 +6,7 @@ const {
   QUALITY_ISSUE_PATTERNS,
   applyDeterministicQualityRepairs,
   auditResumeQuality,
+  repairToolStuffedBulletText,
   reorderSkillsForTarget,
   softenUnsupportedMetricText,
 } = require('./resumeQualityAuditor');
@@ -79,6 +80,21 @@ describe('resume quality auditor', () => {
     expect(audit.qualityWarnings.join('\n')).toContain('same-voice ending "operational stability"');
   });
 
+  it('hard-blocks resumes whose aggregate quality score falls below threshold', () => {
+    const generated = resume({
+      skills: { 'Java Backend': ['Java', 'Spring Boot'] },
+      highlights: Array.from({ length: 7 }, (_, index) =>
+        `Built Java workflow service ${index + 1} with Spring Boot, REST APIs, SQL persistence, and release validation for operational stability.`
+      ),
+    });
+
+    const audit = auditResumeQuality(resume(), generated, javaJd, javaContract);
+
+    expect(audit.qualityScore).toBeLessThan(82);
+    expect(audit.hardIssues.join('\n')).toContain('quality score below threshold');
+    expect(audit.ok).toBe(false);
+  });
+
   it('flags generic phrases and tool-stuffed bullets without treating length as a defect', () => {
     const generated = resume({
       skills: { 'Java Backend': ['Java', 'Spring Boot'] },
@@ -129,6 +145,20 @@ describe('resume quality auditor', () => {
 
     expect(Object.keys(repaired.skills)[0]).toBe('Java Backend');
     expect(repaired.experience[0].highlights[0]).toBe('Reduced failures by 20-30% across 10-15 services.');
+  });
+
+  it('deterministically repairs tool-stuffed bullets into bounded work-story bullets', () => {
+    const original = 'Delivered features using Java, Spring Boot, Spring Framework, REST APIs, Microservices, Hibernate, JPA, JUnit, Maven, Gradle, AWS, Terraform, Docker, Kubernetes, PostgreSQL across enterprise workflows.';
+    const repairedText = repairToolStuffedBulletText(original);
+    const generated = resume({
+      skills: { 'Java Backend': ['Java', 'Spring Boot'] },
+      highlights: [repairedText],
+    });
+    const audit = auditResumeQuality(resume(), generated, javaJd, javaContract);
+
+    expect(repairedText.split(/\s+/).length).toBeGreaterThanOrEqual(24);
+    expect(repairedText.split(/\s+/).length).toBeLessThanOrEqual(52);
+    expect(audit.hardIssues.join('\n')).not.toContain('tool-stuffed bullet');
   });
 
   it('treats screenshot-style authenticity and density warnings as targeted-repair candidates', () => {

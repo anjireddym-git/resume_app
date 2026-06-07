@@ -338,6 +338,144 @@ const RunningPanel = ({ flow, events }) => {
   );
 };
 
+const uniqueIssues = (items = []) => [...new Set((items || []).filter(Boolean))];
+
+const buildReviewIssueGroups = (flow) => {
+  const validator = flow?.validator || {};
+  const errorIssues = flow?.error?.issues || [];
+  const hard = uniqueIssues([
+    ...(validator.hardIssues || []),
+    ...(validator.qualityIssues || []),
+  ]);
+  const soft = uniqueIssues(validator.softIssues || []);
+  const evidence = uniqueIssues((validator.evidenceWarnings || []).map((issue) => `Evidence: ${issue}`));
+  const fallback = uniqueIssues(errorIssues)
+    .filter((issue) => !hard.includes(issue) && !soft.includes(issue) && !evidence.includes(issue));
+
+  return [
+    { id: 'hard', label: 'Blocking issues', tone: 'border-red-200 bg-red-50 text-red-800', items: hard },
+    { id: 'soft', label: 'Quality warnings', tone: 'border-amber-200 bg-amber-50 text-amber-900', items: soft },
+    { id: 'evidence', label: 'Evidence warnings', tone: 'border-blue-200 bg-blue-50 text-blue-900', items: evidence },
+    { id: 'other', label: 'Other validator output', tone: 'border-neutral-200 bg-neutral-50 text-neutral-700', items: fallback },
+  ].filter((group) => group.items.length > 0);
+};
+
+const ReviewIssueGroup = ({ group }) => (
+  <div className={`rounded-lg border p-3 ${group.tone}`}>
+    <div className="text-xs font-semibold mb-2">{group.label}</div>
+    <div className="space-y-1 text-xs leading-relaxed max-h-40 overflow-auto pr-1">
+      {group.items.map((issue) => <div key={issue}>- {issue}</div>)}
+    </div>
+  </div>
+);
+
+const ReviewRequiredPanel = ({ user, flow, resultBundle, onRetry, onArchive }) => {
+  const [showPreview, setShowPreview] = useState(true);
+  const [downloading, setDownloading] = useState(false);
+  const issueGroups = useMemo(() => buildReviewIssueGroups(flow), [flow]);
+  const renderOptions = resultBundle
+    ? buildOutreachDocxRenderOptions(resultBundle.group, resultBundle.full)
+    : null;
+  const filename = buildAttachmentFilename(user, `${deriveOutreachFlowTitle(flow)} Review`);
+
+  const downloadReviewDraft = async () => {
+    if (!resultBundle?.full || !renderOptions) return;
+    setDownloading(true);
+    try {
+      await exportToDOCX(resultBundle.full, filename, renderOptions);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-neutral-900">Generated resume needs review</h2>
+          <p className="text-xs text-neutral-500 mt-1">
+            Email drafting is paused until the blocking resume issues are repaired.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onRetry}
+            className="h-9 px-3 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 inline-flex items-center gap-1.5"
+          >
+            <RefreshCw className="w-4 h-4" /> Retry repair
+          </button>
+          <button
+            type="button"
+            onClick={onArchive}
+            className="h-9 px-3 border border-neutral-200 text-neutral-700 rounded-lg text-sm font-medium hover:bg-neutral-50 inline-flex items-center gap-1.5"
+          >
+            <Archive className="w-4 h-4" /> Archive
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-4">
+        <div className="min-w-0 rounded-xl border border-neutral-200 bg-white overflow-hidden">
+          <div className="h-11 px-3 border-b border-neutral-200 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-neutral-700 truncate">
+                {resultBundle?.resume?.name || 'Review draft'}
+              </div>
+              <div className="text-[11px] text-neutral-500 truncate">
+                {flow.reviewResumeId ? `Review resume ${flow.reviewResumeId}` : 'No review resume saved yet'}
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowPreview((value) => !value)}
+                disabled={!resultBundle?.full}
+                className="h-7 px-2 rounded border border-neutral-200 bg-white text-xs text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center gap-1"
+              >
+                {showPreview ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                {showPreview ? 'Hide' : 'Preview'}
+              </button>
+              <button
+                type="button"
+                onClick={downloadReviewDraft}
+                disabled={downloading || !resultBundle?.full}
+                className="h-7 px-2 rounded border border-neutral-200 bg-white text-xs text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center gap-1"
+              >
+                {downloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                DOCX
+              </button>
+            </div>
+          </div>
+          {showPreview && resultBundle?.full ? (
+            <div className="h-[620px] bg-neutral-100">
+              <GeneratedDocxPreview
+                resumeData={resultBundle.full}
+                renderOptions={renderOptions}
+                debounceMs={100}
+              />
+            </div>
+          ) : (
+            <div className="h-64 flex items-center justify-center text-sm text-neutral-500">
+              {resultBundle?.full ? 'Preview hidden.' : 'No generated review draft was saved for this run.'}
+            </div>
+          )}
+        </div>
+
+        <aside className="space-y-3">
+          {issueGroups.length > 0 ? (
+            issueGroups.map((group) => <ReviewIssueGroup key={group.id} group={group} />)
+          ) : (
+            <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-600">
+              No validator details were saved for this run.
+            </div>
+          )}
+        </aside>
+      </div>
+    </div>
+  );
+};
+
 const DraftPanel = ({
   flow,
   allGroups,
@@ -820,11 +958,21 @@ const FlowDetail = ({
           />
         )}
 
-        {['failed', 'review_required', 'canceled'].includes(flow.status) && (
+        {flow.status === 'review_required' && (
+          <ReviewRequiredPanel
+            user={user}
+            flow={flow}
+            resultBundle={resultBundle}
+            onRetry={retryFlow}
+            onArchive={archiveFlow}
+          />
+        )}
+
+        {['failed', 'canceled'].includes(flow.status) && (
           <div className="py-12 text-center space-y-3">
             <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto" />
             <p className="text-sm font-medium text-neutral-800">
-              {flow.status === 'review_required' ? 'Tailoring needs review' : flow.status === 'canceled' ? 'Flow canceled' : 'Flow failed'}
+              {flow.status === 'canceled' ? 'Flow canceled' : 'Flow failed'}
             </p>
             {flow.validator?.issues?.length > 0 && (
               <div className="max-w-2xl mx-auto text-left text-xs text-neutral-600 bg-neutral-50 border border-neutral-200 rounded-lg p-3">
@@ -1010,14 +1158,16 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
       .catch((err) => setError(err.message || 'Failed to save selected resume.'));
   }, [selectedBaseId, selectedFlow?.id, selectedFlow?.sourceResumeId, selectedFlow?.status]);
 
+  const selectedPreviewResumeId = selectedFlow?.resultResumeId || selectedFlow?.reviewResumeId || null;
+
   useEffect(() => {
-    if (!selectedFlow?.resultResumeId) {
+    if (!selectedPreviewResumeId) {
       setResultBundle(null);
       return;
     }
     let alive = true;
     setResultBundle(null);
-    getResume(selectedFlow.resultResumeId)
+    getResume(selectedPreviewResumeId)
       .then(async (resume) => {
         const group = await getResumeGroup(resume.groupId);
         if (!alive) return;
@@ -1026,7 +1176,7 @@ const FlowsView = ({ user, onSent, onResumeCreated }) => {
       .catch((err) => setError(err.message || 'Failed to load generated resume.'))
       .finally(() => {});
     return () => { alive = false; };
-  }, [selectedFlow?.resultResumeId]);
+  }, [selectedPreviewResumeId]);
 
   const filteredFlows = useMemo(() => {
     const q = search.trim().toLowerCase();

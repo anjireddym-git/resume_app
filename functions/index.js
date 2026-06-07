@@ -2321,12 +2321,15 @@ exports.retryOutreachFlow = onCall({ cors: true }, async (request) => {
     isActive: true,
     archived: false,
     error: null,
+    validator: null,
     cancelRequested: false,
+    retryCount: admin.firestore.FieldValue.increment(1),
     progress: {
       stage: 'queued',
       percent: 5,
       message: 'Queued for retry.',
     },
+    lastRetryAt: serverTimestamp(),
     queuedAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -2661,10 +2664,39 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
         }
 
         if (!validator.ok) {
+          const reviewResumeId = await persistGeneratedResumeServerSide({
+            userId,
+            sourceResumeId: source.resume.id,
+            generatedResume: generated,
+            mode: 'optimize',
+            jobDescription: flow.jobDescription,
+            fieldsToUpdate: OUTREACH_AGENT_FIELDS,
+            label: flow.title || 'Outreach Flow Review Draft',
+            targetResumeName: `Review Needed - ${flow.title || 'Tailored Resume'}`,
+            aiTrace: {
+              model,
+              elapsedMs: null,
+              usage: null,
+              validator,
+              source: 'outreach-flow-worker-review-required',
+            },
+            aiMetadata: generated.metadata || null,
+            reviewStatus: 'review_required',
+            existingResumeId: flow.reviewResumeId || null,
+          });
+          console.warn('[outreach.review_required]', JSON.stringify({
+            flowId,
+            reviewResumeId: reviewResumeId || flow.reviewResumeId || null,
+            hardIssues: validator.hardIssues || [],
+            softIssueCount: (validator.softIssues || []).length,
+            evidenceWarningCount: (validator.evidenceWarnings || []).length,
+            qualityScore: validator.qualityScore ?? null,
+          }));
           await refundOutreachCredits(userId, cost, 'tailored_resume_not_persisted_after_review_required', flowRef);
           await updateOutreachFlowProgress(flowRef, {
             status: 'review_required',
             isActive: true,
+            reviewResumeId: reviewResumeId || flow.reviewResumeId || null,
             validator,
             error: {
               message: 'Tailored resume needs review before drafting an email.',
@@ -2676,7 +2708,7 @@ exports.processQueuedOutreachFlow = onDocumentUpdated(
               message: 'Tailored resume needs review before email drafting.',
             },
             workerLease: null,
-          }, { type: 'review_required', message: 'Tailoring output needs review.', data: { issues: validator.issues } });
+          }, { type: 'review_required', message: 'Tailoring output needs review.', data: { issues: validator.issues, reviewResumeId: reviewResumeId || flow.reviewResumeId || null } });
           return;
         }
 
@@ -4904,6 +4936,8 @@ async function persistGeneratedResumeServerSide({
   targetResumeName,
   aiTrace,
   aiMetadata,
+  reviewStatus = null,
+  existingResumeId = null,
 }) {
   if (!sourceResumeId) return null;
 
@@ -4954,6 +4988,16 @@ async function persistGeneratedResumeServerSide({
 
   const newResumeRef = db.collection('resumes').doc();
   const now = admin.firestore.FieldValue.serverTimestamp();
+  const generationMeta = {
+    sourceResumeId,
+    sourceResumeName: sourceData.name || 'Resume',
+    fieldsUpdated: Array.isArray(fieldsToUpdate) ? fieldsToUpdate : [],
+    jobDescription: jobDescription || '',
+    label: label || null,
+    createdAt: new Date().toISOString(),
+    source: 'agent-server',
+    ...(reviewStatus ? { reviewStatus } : {}),
+  };
 
   const docPayload = {
     userId,
@@ -4963,15 +5007,8 @@ async function persistGeneratedResumeServerSide({
     parentResumeId: sourceResumeId,
     rootResumeId: sourceData.rootResumeId || sourceResumeId,
     generationType: isTransformLike ? 'transform' : 'optimize',
-    generationMeta: {
-      sourceResumeId,
-      sourceResumeName: sourceData.name || 'Resume',
-      fieldsUpdated: Array.isArray(fieldsToUpdate) ? fieldsToUpdate : [],
-      jobDescription: jobDescription || '',
-      label: label || null,
-      createdAt: new Date().toISOString(),
-      source: 'agent-server',
-    },
+    generationMeta,
+    ...(reviewStatus ? { reviewStatus } : {}),
     starred: false,
     starredAt: null,
     childCount: 0,
@@ -4995,6 +5032,34 @@ async function persistGeneratedResumeServerSide({
     ...(aiTrace ? { aiTrace: { ...aiTrace, savedAt: now } } : {}),
     ...(aiMetadata ? { aiMetadata } : {}),
   };
+
+  if (existingResumeId) {
+    const existingRef = db.collection('resumes').doc(existingResumeId);
+    const existingSnap = await existingRef.get();
+    if (existingSnap.exists) {
+      const existing = existingSnap.data();
+      if (existing.userId === userId && existing.parentResumeId === sourceResumeId) {
+        await existingRef.update({
+          name: newName,
+          generationMeta: {
+            ...(existing.generationMeta || {}),
+            ...generationMeta,
+            updatedAt: new Date().toISOString(),
+          },
+          reviewStatus: reviewStatus || existing.reviewStatus || null,
+          jobDescription: jobDescription || '',
+          customData: docPayload.customData,
+          sectionFormats: docPayload.sectionFormats,
+          updatedAt: now,
+          ...(aiTrace ? { aiTrace: { ...aiTrace, savedAt: now } } : {}),
+          ...(aiMetadata ? { aiMetadata } : {}),
+        });
+        console.log('[agent.persist] updated review resume', existingResumeId, 'under group', groupId);
+        return existingResumeId;
+      }
+      console.warn('[agent.persist] existing review resume not reusable:', existingResumeId);
+    }
+  }
 
   const batch = db.batch();
   batch.set(newResumeRef, docPayload);
