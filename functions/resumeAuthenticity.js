@@ -144,6 +144,8 @@ ${roleLine}
 - Latest experience should carry the densest JD-stack match.
 - Previous roles should use evidence-backed adjacent, predecessor, complementary, migration, integration, backend/API, testing, cloud, data, or domain-specific work.
 - Do not blanket-replace every experience with the target technology. Every company should not read like the same JD-template role unless the base resume clearly shows that stack in every role.
+- Do not start older-role narratives with an off-target stack just because it exists in the base resume. For a Java target, Java/backend/API work should lead; Python, AI/ML, GenAI, and data-science support should move later unless the JD asks for them.
+- Do not duplicate a bullet by changing one or two words. If two bullets describe the same workflow, merge the idea into one distinct story and use the remaining bullet for another responsibility.
 - Every bullet must have a distinct work story: different system, feature, responsibility, business context, technical constraint, collaboration pattern, metric, or operational outcome.
 - Use exact JD technology names naturally, but vary chronology and supporting stacks so the resume feels like a real 8-10 year career.
 - Adjacent stack guidance:

@@ -504,14 +504,14 @@ ${targetContext.instructions}
 ${targetContext.qualityInstructions}
 
 ═══════════════════════════════════════════════════════════════════════════════
-ACTION VERBS (Start EVERY bullet with one of these):
+ACTION VERBS (use varied strong verbs; do not repeat one voice):
 ═══════════════════════════════════════════════════════════════════════════════
 Architected, Developed, Engineered, Implemented, Designed, Built, Created, Optimized, Automated, Scaled, Led, Spearheaded, Delivered, Reduced, Increased, Accelerated, Streamlined, Transformed, Migrated, Deployed, Orchestrated, Integrated, Established
 
 ═══════════════════════════════════════════════════════════════════════════════
 ATS OPTIMIZATION REQUIREMENTS:
 ═══════════════════════════════════════════════════════════════════════════════
-1. KEYWORD DENSITY: Naturally incorporate 15-25 industry-standard keywords for the target role
+1. KEYWORD COVERAGE, NOT STUFFING: Cover the target role's core terms in the right sections; do not force every keyword into every company.
 2. STANDARD TERMINOLOGY: Use exact terms ATS systems scan for (e.g., "CI/CD" not "continuous integration pipelines")
 3. SKILLS FORMAT: List skills as comma-separated individual technologies for maximum ATS parsing
 4. NO CREATIVE TITLES: Use standard job titles that match common searches
@@ -535,12 +535,13 @@ TRANSFORMATION INSTRUCTIONS:
 
 3. **JOB TITLES**: Where truthful, reframe titles to highlight relevant aspects (e.g., "Backend Developer" → "Python Developer" if pivoting to ML)
 
-4. **EXPERIENCE HIGHLIGHTS**: Aggressively reframe EVERY bullet to emphasize:
-   - Technologies/skills relevant to target role
-   - Data, analytics, or domain knowledge that transfers
-   - Problem-solving that applies to new field
-   - Add conservative scale signals only where context supports them
-   - Use strong action verbs
+4. **EXPERIENCE HIGHLIGHTS**: Surgically rewrite the bullets so each role has a believable, distinct work story:
+   - Latest role should carry the strongest target-role stack and responsibility match.
+   - Older roles should show adjacent, migration, integration, testing, cloud, data, support, or modernization work when that is more credible than pretending every role used the exact same target stack.
+   - Do not add Spring Boot, AI/ML, Python, AWS, Terraform, or any other target term to every bullet as a suffix.
+   - For Java backend targets, Java/Spring/REST/backend delivery must lead the role narrative; Python/AI/ML/Data support belongs later and only when source evidence or the JD supports it.
+   - Replace weak bullets with specific systems, responsibilities, constraints, and outcomes; do not produce small rewrites of the same sentence.
+   - Add conservative scale signals only where context supports them.
 
 5. **SKILLS**:
    - Add relevant skills the candidate likely has but didn't emphasize
@@ -562,6 +563,8 @@ STRICT RULES:
 ✗ NEVER invent jobs, companies, degrees, or certifications
 ✗ NEVER reduce the number of bullet points
 ✗ NEVER remove experiences or projects
+✗ NEVER make every experience read like the same target-role template
+✗ NEVER create giant Environment/tool-inventory lines; if an environment field exists, keep it short and role-specific
 ✓ CAN add skills the candidate reasonably has based on their experience
 ✓ CAN reframe/rephrase highlights to emphasize different aspects
 ✓ CAN add conservative plausible metric ranges based on context
@@ -640,7 +643,7 @@ ${targetContext.instructions}
 ${targetContext.qualityInstructions}
 
 ═══════════════════════════════════════════════════════════════════════════════
-ACTION VERBS (Start EVERY bullet with one of these):
+ACTION VERBS (use varied strong verbs; do not repeat one voice):
 ═══════════════════════════════════════════════════════════════════════════════
 Architected, Developed, Engineered, Implemented, Designed, Built, Created, Optimized, Automated, Scaled, Led, Spearheaded, Delivered, Reduced, Increased, Accelerated, Streamlined, Transformed, Migrated, Deployed, Orchestrated, Integrated, Established, Pioneered, Championed
 
@@ -648,7 +651,7 @@ Architected, Developed, Engineered, Implemented, Designed, Built, Created, Optim
 ATS OPTIMIZATION REQUIREMENTS:
 ═══════════════════════════════════════════════════════════════════════════════
 1. KEYWORD EXTRACTION: Identify and incorporate ALL key technologies, skills, and terms from the job description
-2. KEYWORD DENSITY: Naturally weave 20-30 job-specific keywords throughout the resume
+2. KEYWORD COVERAGE, NOT STUFFING: Use job-specific keywords in the right sections and placements; do not spray all keywords across all companies
 3. EXACT MATCH: Use exact phrases from the JD where possible (e.g., if JD says "React.js", use "React.js" not just "React")
 4. STANDARD TERMINOLOGY: Use industry-standard terms that ATS systems recognize
 5. SKILLS ORGANIZATION: 
@@ -678,6 +681,16 @@ SUMMARY REQUIREMENTS (CONTRACT-RESUME POINTS):
 - Do not compress the summary to a short sentence block or a single paragraph.
 
 ═══════════════════════════════════════════════════════════════════════════════
+EXPERIENCE REWRITE REQUIREMENTS:
+═══════════════════════════════════════════════════════════════════════════════
+- Rewrite bullets as credible replacements, not old bullets with JD keywords appended.
+- Latest role should carry the strongest target stack and responsibility match.
+- Older roles should show believable chronology: adjacent, migration, integration, testing, cloud, data, support, platform, or modernization work when exact target-stack usage is not evidenced.
+- For Java backend targets, Java/Spring/REST/backend delivery must lead role narratives; Python, AI/ML, GenAI, MLOps, and data-science support must be secondary unless the JD explicitly asks for them.
+- Do not spread role-default skills like Spring Boot, Hibernate/JPA, JUnit, Maven, or Gradle into every older role unless the base resume directly supports that history.
+- Avoid duplicate or near-duplicate bullets; do not reuse the same sentence with one or two words changed.
+
+═══════════════════════════════════════════════════════════════════════════════
 STRICT RULES:
 ═══════════════════════════════════════════════════════════════════════════════
 1. ✗ NEVER invent: jobs, companies, degrees, dates, certifications, or false metrics
@@ -688,6 +701,8 @@ STRICT RULES:
 6. ✓ ATS-FRIENDLY: Use standard terms that ATS systems recognize
 7. ✓ PRESERVE STRUCTURE: Keep exact JSON schema
 8. ✓ BE SPECIFIC: Use specific technologies, numbers, and outcomes
+9. ✗ NEVER make every experience read like the same current-JD role; the latest role can be JD-heavy, older roles must have credible chronology
+10. ✗ NEVER create giant Environment/tool-inventory lines; if an environment field exists, keep it short and role-specific
 
 Return ONLY valid JSON. No markdown, no code fences.`;
 
@@ -3998,8 +4013,12 @@ Writing rules:
 - Each bullet should be specific, plausible, and usually ${CONTRACT_DENSITY.bulletTargetMinWords}-${CONTRACT_DENSITY.bulletTargetMaxWords} words so it visually wraps to about two resume lines.
 - Prefer concrete delivery language: systems built, APIs shipped, data handled, cloud/services used, reliability, performance, automation, collaboration.
 - Before writing, silently build a per-role stack map. Do not blanket-replace every company with the JD's primary stack; make the latest role the strongest match and make older roles use believable adjacent, legacy, migration, integration, API, testing, cloud, data, or domain work when supported by the base resume.
+- Treat required target skills as placement obligations, not permission to rewrite the whole career as one stack. If a required skill is role-default but not evidenced in the base resume, use it in required placements and avoid spreading it through every older role.
+- For Java backend roles, Java/Spring/REST/backend delivery must dominate the headline, skills, summary, and leading bullets. Python, AI/ML, GenAI, MLOps, and data-science support should be secondary unless the JD explicitly asks for them.
 - Every bullet must tell a distinct work story. Avoid repeated sentence templates, repeated metric phrasing, and bullets that read like small refactors of each other.
+- Do not create duplicate or near-duplicate bullets inside the same role, such as two bullets that both describe the same pandas cleanup/reporting work with tiny wording changes.
 - Use metrics only when they feel believable. Avoid fake-sounding numbers, generic claims, repeated sentence patterns, and buzzword padding.
+- Do not create giant Environment/tool-inventory lines. If an environment field exists in source data, keep it short and specific to that role.
 - Remove old-stack emphasis that the JD does not ask for, unless it helps show transferable value.
 - Keep the resume human and recruiter-ready, not like AI-generated marketing copy.
 
@@ -4564,10 +4583,23 @@ function parseBulletIssueRepairOperations(issue = '', resume = {}) {
     return operations;
   }
 
-  if (/target stack overuse|same target stack in every older role/i.test(text)) {
-    operations.push({
-      type: 'rebalance_stack_distribution',
-      reason: text,
+  const offTargetRoleMatch = text.match(/off-target .* dominates leading bullets at experience "([^"]+)"/i);
+  if (offTargetRoleMatch) {
+    const expIndex = findExperienceIndexForIssueLabel(resume, offTargetRoleMatch[1]);
+    if (expIndex >= 0) {
+      operations.push({
+        type: 'rewrite_role_bullets',
+        expIndex,
+        reason: text,
+      });
+    }
+    return operations;
+  }
+
+	  if (/target stack overuse|same target stack in every older role/i.test(text)) {
+	    operations.push({
+	      type: 'rebalance_stack_distribution',
+	      reason: text,
     });
     return operations;
   }
@@ -4748,7 +4780,10 @@ RULES:
 - Patch only the bullets listed in TARGETED BULLET SNIPPETS.
 - For Java backend resumes, Java Backend skills must come before AI/ML, GenAI, Python/Data, and MLOps unless the JD asks for those areas.
 - For target stack overuse or "same target stack" warnings, keep the latest role JD-heavy but diversify older roles with adjacent, integration, testing, cloud, data, migration, platform, or support stories supported by ORIGINAL_RESUME.
+- For unverified role-default skills, keep required placement coverage but remove or soften older-role usage unless ORIGINAL_RESUME directly supports that technology.
+- For off-target AI/ML/Python dominance in a Java backend resume, rewrite the listed role's leading bullets so Java/backend/API delivery comes first and AI/ML/Python appears only as secondary support when source-backed.
 - For tool-stuffed bullets, use no more than 5 named technologies in the repaired bullet; replace long tool lists with a specific system, responsibility, constraint, and outcome.
+- For near-duplicate bullets, keep the stronger idea and make the repaired bullet describe a different responsibility, system, constraint, or outcome.
 - For bullet length warnings, keep the repaired bullet between 24 and 52 words, preferably 28-45 words.
 - Metrics may use conservative ranges such as 20-30%, 5-10 services, thousands of records, or multi-environment releases.
 - Do not create fake-precise metrics like 28%, $500K, 12 services, or 99.99% uptime unless present in ORIGINAL_RESUME.
@@ -5177,7 +5212,11 @@ exports.runResumeAgentStreaming = onCall(
       `roles should have 16+ bullets. When the base has 3+ experience entries, older roles ` +
       `combined should have 50+ bullets. For skills, preserve dynamic category labels from ` +
       `the base resume when relevant, order JD-critical categories first, and return the ` +
-      `schema's ordered { label, items } category array without forcing generic buckets.\n\n` +
+      `schema's ordered { label, items } category array without forcing generic buckets. ` +
+      `Treat required target skills as placement obligations, not permission to make every ` +
+      `older company use the same target stack. For Java backend targets, Java/Spring/REST ` +
+      `delivery should lead; AI/ML/Python/data support must stay secondary unless the JD asks ` +
+      `for it. Do not create duplicate bullets or giant Environment/tool-inventory lines.\n\n` +
       `${buildContractDensityInstructions(resume)}\n\n` +
       `${buildAuthenticityInstructions(resume, jobDescription)}\n\n` +
       `BASE_RESUME:\n${JSON.stringify(resume, null, 2)}\n\n` +

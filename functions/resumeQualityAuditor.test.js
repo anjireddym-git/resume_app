@@ -11,6 +11,7 @@ const {
   softenUnsupportedMetricText,
 } = require('./resumeQualityAuditor');
 const {
+  buildEvidenceMatrix,
   buildTargetRoleContract,
 } = require('./targetRoleContract');
 
@@ -80,7 +81,7 @@ describe('resume quality auditor', () => {
     expect(audit.qualityWarnings.join('\n')).toContain('same-voice ending "operational stability"');
   });
 
-  it('hard-blocks resumes whose aggregate quality score falls below threshold', () => {
+  it('warns without hard-blocking when only aggregate quality score falls below target', () => {
     const generated = resume({
       skills: { 'Java Backend': ['Java', 'Spring Boot'] },
       highlights: Array.from({ length: 7 }, (_, index) =>
@@ -91,8 +92,9 @@ describe('resume quality auditor', () => {
     const audit = auditResumeQuality(resume(), generated, javaJd, javaContract);
 
     expect(audit.qualityScore).toBeLessThan(82);
-    expect(audit.hardIssues.join('\n')).toContain('quality score below threshold');
-    expect(audit.ok).toBe(false);
+    expect(audit.qualityWarnings.join('\n')).toContain('quality score below target');
+    expect(audit.hardIssues.join('\n')).not.toContain('quality score below');
+    expect(audit.ok).toBe(true);
   });
 
   it('flags generic phrases and tool-stuffed bullets without treating length as a defect', () => {
@@ -108,6 +110,77 @@ describe('resume quality auditor', () => {
     expect(audit.hardIssues.join('\n')).toContain('tool-stuffed bullet');
     expect(audit.qualityWarnings.join('\n')).toContain('enterprise workflows');
     expect(audit.qualityWarnings.join('\n')).not.toContain('too many bullets');
+  });
+
+  it('flags AI/ML/Python dominance in leading bullets for Java backend targets', () => {
+    const generated = {
+      personalInfo: { title: 'Senior Java Backend Engineer' },
+      summary: 'Senior Java Backend Engineer building Spring Boot REST APIs.',
+      skills: { 'Java Backend': ['Java', 'Spring Boot', 'REST APIs'] },
+      experience: [
+        {
+          company: 'CurrentCo',
+          position: 'Senior Java Backend Engineer',
+          highlights: [
+            'Designed Python FastAPI services with pandas and OpenAI integrations for workflow automation, validation support, and internal reporting across backend-adjacent delivery teams.',
+            'Built Java REST APIs for service validation, SQL persistence, and release support across shared backend applications.',
+          ],
+        },
+      ],
+    };
+
+    const audit = auditResumeQuality(resume(), generated, javaJd, javaContract);
+
+    expect(audit.qualityWarnings.join('\n')).toContain('off-target AI/ML/Python stack dominates leading bullets');
+    expect(audit.repairPlan.operations.some((op) => op.type === 'rewrite_role_bullets' && op.expIndex === 0)).toBe(true);
+  });
+
+  it('warns when unverified role-default skills spread into older roles', () => {
+    const roleDefaultJd = 'Senior Java Developer';
+    const contract = buildTargetRoleContract(roleDefaultJd);
+    const base = {
+      personalInfo: { title: 'Java Developer' },
+      summary: 'Java developer building REST APIs and SQL-backed services.',
+      skills: { Backend: ['Java', 'REST APIs', 'SQL'] },
+      experience: [
+        { company: 'CurrentCo', position: 'Java Developer', highlights: ['Built Java REST APIs with SQL validation for backend workflows.'] },
+        { company: 'OlderCo', position: 'Software Developer', highlights: ['Supported Java service integrations and database validation work.'] },
+        { company: 'LegacyCo', position: 'Software Developer', highlights: ['Maintained Java utilities, SQL reports, and release support scripts.'] },
+      ],
+    };
+    const generated = {
+      ...base,
+      personalInfo: { title: 'Senior Java Backend Engineer | Spring Boot' },
+      summary: 'Senior Java Backend Engineer using Spring Boot for REST API delivery.',
+      skills: { 'Java Backend': ['Java', 'Spring Boot', 'REST APIs', 'SQL'] },
+      experience: [
+        { ...base.experience[0], highlights: ['Built Spring Boot REST APIs with Java validation, SQL persistence, and backend release support for internal service consumers.'] },
+        { ...base.experience[1], highlights: ['Built Spring Boot services for Java integrations, request validation, and SQL-backed support workflows across older application releases.'] },
+        { ...base.experience[2], highlights: ['Maintained Spring Boot utilities for Java reporting workflows, SQL reconciliation, and deployment support across legacy systems.'] },
+      ],
+    };
+    const matrix = buildEvidenceMatrix(base, contract);
+
+    const audit = auditResumeQuality(base, generated, roleDefaultJd, contract, matrix);
+
+    expect(audit.qualityWarnings.join('\n')).toContain('unverified role-default skill "Spring Boot"');
+    expect(audit.roleCoherenceReport.roleDefaultSpread.some((entry) => entry.label === 'Spring Boot' && entry.olderRoleCount === 2)).toBe(true);
+    expect(audit.repairPlan.operations.some((op) => op.type === 'rewrite_role_bullets' && op.expIndex === 1)).toBe(true);
+  });
+
+  it('flags near-duplicate bullets inside the same role', () => {
+    const generated = resume({
+      skills: { 'Java Backend': ['Java', 'Spring Boot'] },
+      highlights: [
+        'Built pandas scripts for data cleanup, file parsing, feature preparation, report generation, and reconciliation across operational datasets, giving analysts repeatable outputs for routine reviews.',
+        'Built pandas scripts for cleanup, file parsing, feature preparation, report generation, and reconciliation across large operational datasets used by downstream teams.',
+      ],
+    });
+
+    const audit = auditResumeQuality(resume(), generated, javaJd, javaContract);
+
+    expect(audit.qualityWarnings.join('\n')).toContain('near-duplicate bullet');
+    expect(audit.repairPlan.operations.some((op) => op.type === 'rewrite_bullet' && op.highlightIndex === 1)).toBe(true);
   });
 
   it('rejects unsupported fake-precise metrics and allows conservative plausible ranges as assumptions', () => {

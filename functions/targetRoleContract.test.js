@@ -157,5 +157,6 @@ describe('target role contract helpers', () => {
     expect(instructions).toContain('TARGET ROLE CONTRACT');
     expect(instructions).toContain('Spring Boot: required in skills, title/summary, latest experience');
     expect(instructions).toContain('role_default_unverified');
+    expect(instructions).toContain('Role-default assumptions are placement obligations');
   });
 });

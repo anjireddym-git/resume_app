@@ -6,11 +6,12 @@ const QUALITY_CONFIG = Object.freeze({
   repeatedSkeletonThreshold: 3,
   repeatedEndingThreshold: 3,
   maxTechTermsPerBullet: 8,
+  nearDuplicateThreshold: 0.78,
   targetScore: 82,
 });
 
 const QUALITY_ISSUE_PATTERNS = Object.freeze({
-  repairableSoft: /quality:|bullet|generic|repeated|same-voice|tool-stuffed|metric|skill order|role coherence|target stack|same target stack|similarity|opening phrase|sentence template|delivery verb/i,
+  repairableSoft: /quality:|bullet|generic|repeated|same-voice|tool-stuffed|metric|skill order|role coherence|target stack|same target stack|role-default|similarity|opening phrase|sentence template|delivery verb/i,
 });
 
 const JAVA_CORE_CATEGORY_PATTERNS = [
@@ -53,6 +54,17 @@ const AI_TARGET_PATTERNS = [
   /\bdata scientist\b/i,
 ];
 
+const JAVA_BACKEND_CONTENT_TERMS = [
+  'java', 'spring boot', 'spring framework', 'spring', 'rest api', 'rest apis',
+  'microservices', 'hibernate', 'jpa', 'junit', 'maven', 'gradle', 'sql',
+];
+
+const OFF_TARGET_JAVA_CONTENT_TERMS = [
+  'python', 'fastapi', 'flask', 'django', 'pandas', 'numpy', 'scikit-learn',
+  'tensorflow', 'pytorch', 'machine learning', 'mlops', 'genai', 'openai',
+  'llm', 'rag', 'prompt engineering', 'model training', 'model deployment',
+];
+
 const TECH_TERMS = [
   'java', 'spring boot', 'spring framework', 'spring', 'rest api', 'rest apis',
   'microservices', 'hibernate', 'jpa', 'junit', 'maven', 'gradle', 'aws',
@@ -93,6 +105,13 @@ const GENERIC_ENDINGS = [
   'release support',
   'enterprise applications',
 ];
+
+const DUPLICATE_STOPWORDS = new Set([
+  'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'of', 'on',
+  'or', 'the', 'to', 'with', 'within', 'using', 'across', 'through', 'via',
+  'that', 'this', 'these', 'those', 'while', 'which', 'used', 'built',
+  'created', 'implemented', 'developed', 'designed', 'delivered', 'engineered',
+]);
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -282,11 +301,51 @@ function countTechTerms(text = '') {
   return TECH_TERMS.reduce((count, term) => count + (termPattern(term).test(text) ? 1 : 0), 0);
 }
 
+function countUniqueTerms(text = '', terms = []) {
+  return terms.reduce((count, term) => count + (termPattern(term).test(text) ? 1 : 0), 0);
+}
+
+function experienceLeadText(exp = {}) {
+  return [
+    exp?.position,
+    ...(Array.isArray(exp?.highlights) ? exp.highlights.slice(0, 4) : []),
+  ].filter(Boolean).join(' ');
+}
+
+function experienceFullText(exp = {}) {
+  return [
+    exp?.position,
+    exp?.environment,
+    ...(Array.isArray(exp?.highlights) ? exp.highlights : []),
+  ].filter(Boolean).join(' ');
+}
+
 function isToolStackedBullet(text = '') {
   const lower = normalizeText(text);
   return countTechTerms(lower) >= QUALITY_CONFIG.maxTechTermsPerBullet
     || /^delivered features using\b/i.test(lower)
     || /\busing\s+([a-z0-9+#/.]+\s*,\s*){6,}/i.test(lower);
+}
+
+function meaningfulTokenSet(text = '') {
+  return new Set(
+    normalizeText(text)
+      .replace(/[$]?\d+(?:\.\d+)?%?/g, ' ')
+      .replace(/[^a-z0-9+#. ]+/g, ' ')
+      .split(/\s+/)
+      .map((token) => token.replace(/^\.+|\.+$/g, ''))
+      .map((token) => (token.length > 4 && token.endsWith('s') ? token.slice(0, -1) : token))
+      .filter((token) => token.length > 2 && !DUPLICATE_STOPWORDS.has(token))
+  );
+}
+
+function tokenSimilarity(a, b) {
+  if (!a.size || !b.size) return 0;
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection += 1;
+  }
+  return intersection / Math.min(a.size, b.size);
 }
 
 function auditBulletRealism(generated = {}) {
@@ -340,7 +399,114 @@ function auditBulletRealism(generated = {}) {
     }
   }
 
+  const bulletsByRole = new Map();
+  for (const bullet of bullets.filter((item) => item.section === 'experience')) {
+    const key = `${bullet.section}:${bullet.expIndex}`;
+    if (!bulletsByRole.has(key)) bulletsByRole.set(key, []);
+    bulletsByRole.get(key).push({ ...bullet, tokens: meaningfulTokenSet(bullet.text) });
+  }
+
+  for (const roleBullets of bulletsByRole.values()) {
+    for (let i = 0; i < roleBullets.length; i += 1) {
+      for (let j = 0; j < i; j += 1) {
+        const similarity = tokenSimilarity(roleBullets[i].tokens, roleBullets[j].tokens);
+        if (similarity < QUALITY_CONFIG.nearDuplicateThreshold) continue;
+        warnings.push(`quality: near-duplicate bullet at experience "${roleBullets[i].company}"[${roleBullets[i].highlightIndex}] overlaps [${roleBullets[j].highlightIndex}] ${Math.round(similarity * 100)}%`);
+        repairOps.push({
+          type: 'rewrite_bullet',
+          path: roleBullets[i].path,
+          expIndex: roleBullets[i].expIndex,
+          highlightIndex: roleBullets[i].highlightIndex,
+          reason: 'Rewrite near-duplicate bullet into a distinct work story.',
+        });
+        break;
+      }
+    }
+  }
+
   return { hardIssues, warnings, repairOps };
+}
+
+function auditJavaExperienceCoherence(generated = {}, targetContract = {}, targetText = '') {
+  const warnings = [];
+  const repairOps = [];
+  const experienceFocus = [];
+  if (!isJavaBackendTarget(targetContract) || targetAsksForAi(targetText)) {
+    return { hardIssues: [], warnings, repairOps, report: { experienceFocus } };
+  }
+
+  const experience = Array.isArray(generated.experience) ? generated.experience : [];
+  experience.forEach((exp, expIndex) => {
+    const leadText = experienceLeadText(exp);
+    const javaHits = countUniqueTerms(leadText, JAVA_BACKEND_CONTENT_TERMS);
+    const offTargetHits = countUniqueTerms(leadText, OFF_TARGET_JAVA_CONTENT_TERMS);
+    const firstBullet = Array.isArray(exp?.highlights) ? exp.highlights[0] : '';
+    const firstBulletJavaHits = countUniqueTerms(firstBullet, JAVA_BACKEND_CONTENT_TERMS);
+    const firstBulletOffTargetHits = countUniqueTerms(firstBullet, OFF_TARGET_JAVA_CONTENT_TERMS);
+    experienceFocus.push({
+      company: exp?.company || `experience[${expIndex}]`,
+      expIndex,
+      javaBackendSignals: javaHits,
+      offTargetSignals: offTargetHits,
+      firstBulletJavaSignals: firstBulletJavaHits,
+      firstBulletOffTargetSignals: firstBulletOffTargetHits,
+    });
+
+    const offTargetLeadsRole = offTargetHits >= 4 && offTargetHits >= javaHits;
+    const offTargetLeadsFirstBullet = firstBulletOffTargetHits >= 3 && firstBulletOffTargetHits > Math.max(firstBulletJavaHits, 1);
+    if (offTargetLeadsRole || offTargetLeadsFirstBullet) {
+      const company = exp?.company || `experience[${expIndex}]`;
+      warnings.push(`quality: off-target AI/ML/Python stack dominates leading bullets at experience "${company}"; Java backend should lead for this target role`);
+      repairOps.push({
+        type: 'rewrite_role_bullets',
+        expIndex,
+        reason: `Make leading bullets at "${company}" read like Java/backend delivery first; keep AI/ML/Python as secondary support only if source-backed.`,
+      });
+    }
+  });
+
+  return { hardIssues: [], warnings, repairOps, report: { experienceFocus } };
+}
+
+function auditRoleDefaultAssumptionSpread(generated = {}, targetContract = {}, evidenceMatrix = null) {
+  const warnings = [];
+  const repairOps = [];
+  const spread = [];
+  const evidenceById = new Map((evidenceMatrix?.requirements || []).map((entry) => [entry.requirementId, entry]));
+  const experience = Array.isArray(generated.experience) ? generated.experience : [];
+  if (!experience.length) return { hardIssues: [], warnings, repairOps, report: { roleDefaultSpread: spread } };
+
+  for (const requirement of targetContract.requirements || []) {
+    const evidence = evidenceById.get(requirement.id);
+    if (evidence?.evidence !== 'role_default_unverified') continue;
+    const aliases = requirement.aliases || [];
+    const matchingRoles = experience
+      .map((exp, expIndex) => ({ exp, expIndex, text: experienceFullText(exp) }))
+      .filter(({ text }) => aliases.some((alias) => termPattern(alias).test(text)));
+    const olderMatches = matchingRoles.filter(({ expIndex }) => expIndex > 0);
+    spread.push({
+      requirementId: requirement.id,
+      label: requirement.label,
+      roles: matchingRoles.map(({ exp, expIndex }) => exp?.company || `experience[${expIndex}]`),
+      olderRoleCount: olderMatches.length,
+    });
+
+    const shouldWarn = requirement.id === 'spring_boot'
+      ? olderMatches.length >= 1
+      : olderMatches.length >= 2;
+    if (!shouldWarn) continue;
+
+    warnings.push(`quality: unverified role-default skill "${requirement.label}" appears in ${olderMatches.length} older role(s); keep it to required placements unless base evidence supports older-role usage`);
+    olderMatches.forEach(({ exp, expIndex }) => {
+      repairOps.push({
+        type: 'rewrite_role_bullets',
+        expIndex,
+        reason: `Reduce unverified role-default skill "${requirement.label}" at "${exp?.company || `experience[${expIndex}]`}" unless ORIGINAL_RESUME directly supports it.`,
+      });
+    });
+  }
+
+  return { hardIssues: [], warnings, repairOps, report: { roleDefaultSpread: spread } };
 }
 
 function flattenResumeText(resume = {}) {
@@ -442,17 +608,19 @@ function computeQualityScore({ hardCount = 0, warningCount = 0 } = {}) {
   return Math.max(0, Math.min(100, 100 - (hardCount * 18) - (warningCount * 4)));
 }
 
-function auditResumeQuality(original = {}, generated = {}, targetText = '', targetContract = {}) {
+function auditResumeQuality(original = {}, generated = {}, targetText = '', targetContract = {}, evidenceMatrix = null) {
   const skill = skillOrderAudit(generated, targetContract, targetText);
+  const javaExperience = auditJavaExperienceCoherence(generated, targetContract, targetText);
+  const roleDefaultSpread = auditRoleDefaultAssumptionSpread(generated, targetContract, evidenceMatrix);
   const bullet = auditBulletRealism(generated);
   const metrics = auditMetrics(original, generated);
-  const parts = [skill, bullet, metrics];
+  const parts = [skill, javaExperience, roleDefaultSpread, bullet, metrics];
   const hardIssues = parts.flatMap((part) => part.hardIssues || []);
   const qualityWarnings = parts.flatMap((part) => part.warnings || []);
   const repairPlan = buildQualityRepairPlan(parts);
   const qualityScore = computeQualityScore({ hardCount: hardIssues.length, warningCount: qualityWarnings.length });
   if (qualityScore < QUALITY_CONFIG.targetScore) {
-    hardIssues.push(`quality: quality score below threshold: ${qualityScore}/${QUALITY_CONFIG.targetScore}`);
+    qualityWarnings.push(`quality: quality score below target: ${qualityScore}/${QUALITY_CONFIG.targetScore}`);
   }
 
   return {
@@ -462,7 +630,11 @@ function auditResumeQuality(original = {}, generated = {}, targetText = '', targ
     softIssues: qualityWarnings,
     qualityIssues: hardIssues,
     qualityWarnings,
-    roleCoherenceReport: skill.report,
+    roleCoherenceReport: {
+      ...(skill.report || {}),
+      ...(javaExperience.report || {}),
+      ...(roleDefaultSpread.report || {}),
+    },
     metricAssumptions: metrics.metricAssumptions,
     claimRiskReport: metrics.claimRiskReport,
     repairPlan,
@@ -554,15 +726,21 @@ function softenUnsupportedMetricText(text = '') {
 
 function buildResumeQualityInstructions(targetContract = {}) {
   const roleLine = isJavaBackendTarget(targetContract)
-    ? '- For Java backend resumes, lead with Java Backend skills; keep AI/ML, GenAI, Python/Data, and MLOps secondary unless the JD explicitly asks for them.'
+    ? '- For Java backend resumes, lead with Java Backend skills and Java/Spring/REST/backend delivery; keep AI/ML, GenAI, Python/Data, and MLOps secondary unless the JD explicitly asks for them.'
     : '- Keep skill category order aligned to the detected target role.';
 
   return `RESUME QUALITY CONTRACT:
 ${roleLine}
 - Dense resumes are allowed; do not reduce bullet count just to be concise.
+- Rewrite experience bullets surgically. Do not merely attach the target stack to old bullets or make every company sound like the same current JD.
+- Latest role may carry the strongest target stack. Older roles need believable chronology: adjacent, migration, integration, testing, data, cloud, platform, support, or legacy modernization stories based on source evidence.
+- If a target skill is a role-default assumption rather than explicit source evidence, use it in required placements and avoid spreading it across every older role.
+- For Java backend roles, the first several bullets of each Java-titled role should read as Java/backend delivery before mentioning Python, AI/ML, GenAI, or data-science support.
 - Avoid same-voice bullets. Vary systems, responsibilities, constraints, outcomes, and sentence structure across roles.
 - Do not end many bullets with the same generic outcome such as operational stability, release confidence, or manual effort.
 - Avoid tool-stuffed bullets that are mostly a technology list. Every bullet needs a distinct work story.
+- Avoid duplicate or near-duplicate bullets. Two bullets in the same role must not tell the same story with one or two words changed.
+- Do not create giant Environment/tool-inventory lines. If an environment field exists, keep it short and limited to the technologies genuinely used in that role.
 - Metrics policy: conservative plausible ranges are allowed when source evidence is thin, but avoid fake-precise claims such as 28%, $500K, 12 services, or 99.99% uptime unless present in the base resume.
 - Prefer conservative phrasing such as 20-30%, 5-10 services, thousands of records, multi-environment releases, several APIs, or measurable operational improvement.`;
 }

@@ -437,7 +437,8 @@ ${(evidenceMatrix?.requirements || []).map(evidenceLine).join('\n')}
 WRITING CONTRACT:
 - Place every requirement in its listed resume locations. If any placement is missing after generation, the resume will be repaired or blocked.
 - For role_default_unverified requirements, include the skill naturally as a target-role assumption and avoid overstating unsupported certifications, dates, employers, or degrees.
-- For Java backend roles, Spring Boot must appear in skills, title/summary, and latest experience even when the base resume did not mention it.`;
+- Role-default assumptions are placement obligations, not career-history proof. Do not spread unverified role-default skills across every older experience unless the base resume directly supports that usage.
+- For Java backend roles, Spring Boot must appear in skills, title/summary, and latest experience even when the base resume did not mention it; older roles should use Spring Boot only when source evidence or a credible migration/integration story supports it.`;
 }
 
 module.exports = {

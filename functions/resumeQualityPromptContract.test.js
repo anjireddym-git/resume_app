@@ -27,7 +27,10 @@ describe('resume quality auditor integration contract', () => {
 
   it('tells targeted repair how to fix screenshot-style stack and bullet issues', () => {
     expect(source).toContain('For target stack overuse or "same target stack" warnings');
+    expect(source).toContain('For unverified role-default skills');
+    expect(source).toContain('For off-target AI/ML/Python dominance in a Java backend resume');
     expect(source).toContain('For tool-stuffed bullets, use no more than 5 named technologies');
+    expect(source).toContain('For near-duplicate bullets');
     expect(source).toContain('For bullet length warnings, keep the repaired bullet between 24 and 52 words');
   });
 
@@ -42,5 +45,13 @@ describe('resume quality auditor integration contract', () => {
   it('keeps the conservative metric policy in prompts', () => {
     expect(source).toContain('Avoid fake-precise claims such as "28%", "$500K", "12 services", or "99.99% uptime"');
     expect(source).toContain('conservative ranges or scale language');
+  });
+
+  it('prevents blanket target-stack rewriting in generation prompts', () => {
+    expect(source).toContain('KEYWORD COVERAGE, NOT STUFFING');
+    expect(source).toContain('Treat required target skills as placement obligations, not permission to make every');
+    expect(source).toContain('Do not create duplicate bullets or giant Environment/tool-inventory lines');
+    expect(auditorSource).toContain('Do not merely attach the target stack to old bullets');
+    expect(auditorSource).toContain('use it in required placements and avoid spreading it across every older role');
   });
 });
